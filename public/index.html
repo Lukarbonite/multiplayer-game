@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multiplayer Game</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Start Screen Overlay -->
+    <div id="start-screen">
+        <div class="start-form">
+            <h1>Join the Game</h1>
+            <p id="final-score" class="hidden"></p>
+            <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
+            <label for="color-picker">Choose your color:</label>
+            <input type="color" id="color-picker" value="#3498db">
+            <label for="image-picker">Or upload an image (replaces color):</label>
+            <input type="file" id="image-picker" accept="image/png, image/jpeg, image/gif">
+            <button id="play-button">Play</button>
+            <p id="error-message" class="hidden"></p>
+        </div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
