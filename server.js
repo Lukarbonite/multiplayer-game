@@ -11,25 +11,22 @@ const io = socketIo(server);
 const PORT = 3000;
 const WORLD_WIDTH = 4000;
 const WORLD_HEIGHT = 4000;
-const PELLET_COUNT = 300;
+const PELLET_COUNT = 400;
 const PELLET_RADIUS = 5;
 const VIRUS_COUNT = 20;
 
 const PLAYER_START_SCORE = 1;
-const CELL_BASE_MASS = 399; 
+const CELL_BASE_MASS = 399;
 const PELLET_SCORE_VALUE = 5;
 const PLAYER_MIN_SPLIT_SCORE = 50;
 const CELL_CONSUME_THRESHOLD = 0.5;
 
 const PLAYER_MERGE_TIME = 15000;
 const PLAYER_SPLIT_LAUNCH_DECAY = 0.94;
-
-// --- FIX: Added constants for ejecting mass ---
 const PLAYER_MIN_EJECT_SCORE = 50;
 const EJECTED_MASS_SCORE = 10;
 const EJECTED_MASS_RADIUS = 10;
 
-// --- FIX: Added constants for Viruses ---
 const VIRUS_SCORE = 100;
 const VIRUS_COLOR = '#33ff33';
 const VIRUS_CONSUME_SCORE_GAIN_SPLIT = 10;
@@ -40,18 +37,24 @@ const DUD_PLAYER_ID = 'duds';
 app.use(express.static('public'));
 
 let players = {};
-// let pellets = []; // This array is no longer needed.
 let cellIdCounter = 0;
+let playerInputs = {};
+let lastBroadcastState = {};
 
 function getRadiusFromScore(score) {
-    return Math.sqrt(score + CELL_BASE_MASS);
+    const baseRadius = Math.sqrt(score + CELL_BASE_MASS);
+    // Dynamic scaling: small cells stay closer to original size, large cells grow dramatically
+    const scaleFactor = 1.0 + (score / 100) * 0.8; // Grows from 1.0x to 1.8x as score increases
+    return baseRadius * Math.min(scaleFactor, 1.8);
 }
 
 function getRandomColor() {
-  const letters = '0123456789ABCDEF';
-  let color = '#';
-  for (let i = 0; i < 6; i++) { color += letters[Math.floor(Math.random() * 16)]; }
-  return color;
+    const letters = '0123456789ABCDEF';
+    let color = '#';
+    for (let i = 0; i < 6; i++) {
+        color += letters[Math.floor(Math.random() * 16)];
+    }
+    return color;
 }
 
 function createPellet() {
@@ -64,13 +67,12 @@ function createPellet() {
         radius: PELLET_RADIUS,
         color: getRandomColor(),
         nickname: '',
-        type: 'pellet', // Identify as a pellet
-        id: DUD_PLAYER_ID, // All pellets belong to the 'dud' player
+        type: 'pellet',
+        id: DUD_PLAYER_ID,
         cellId: cellIdCounter++,
     };
 }
 
-// --- FIX: Added function to create viruses ---
 function createVirus() {
     const halfWidth = WORLD_WIDTH / 2;
     const halfHeight = WORLD_HEIGHT / 2;
@@ -82,276 +84,494 @@ function createVirus() {
         radius: getRadiusFromScore(score),
         color: VIRUS_COLOR,
         nickname: '',
-        type: 'virus', // Identify as a virus
+        type: 'virus',
         id: DUD_PLAYER_ID,
         cellId: cellIdCounter++,
     };
 }
 
 function initializeGameObjects() {
-    players = {}; // Reset all players
-    players[DUD_PLAYER_ID] = []; // Create the 'duds' player to hold pellets and viruses
-    for (let i = 0; i < PELLET_COUNT; i++) { players[DUD_PLAYER_ID].push(createPellet()); }
-    for (let i = 0; i < VIRUS_COUNT; i++) { players[DUD_PLAYER_ID].push(createVirus()); }
+    players = {};
+    players[DUD_PLAYER_ID] = [];
+    for (let i = 0; i < PELLET_COUNT; i++) {
+        players[DUD_PLAYER_ID].push(createPellet());
+    }
+    for (let i = 0; i < VIRUS_COUNT; i++) {
+        players[DUD_PLAYER_ID].push(createVirus());
+    }
+    lastBroadcastState = {};
 }
 initializeGameObjects();
 
 io.on('connection', (socket) => {
-  console.log('User connected, waiting for join:', socket.id);
+    console.log('User connected, waiting for join:', socket.id);
 
-  socket.on('joinGame', (data) => {
-    console.log(`Player ${data.nickname} (${socket.id}) joined.`);
-    const halfWidth = WORLD_WIDTH / 2;
-    const halfHeight = WORLD_HEIGHT / 2;
-    players[socket.id] = [{
-      x: Math.floor(Math.random() * WORLD_WIDTH) - halfWidth,
-      y: Math.floor(Math.random() * WORLD_HEIGHT) - halfHeight,
-      score: PLAYER_START_SCORE,
-      radius: getRadiusFromScore(PLAYER_START_SCORE),
-      color: data.color || '#ffffff',
-      nickname: data.nickname || 'Player',
-      id: socket.id,
-      cellId: cellIdCounter++,
-      vx: 0,
-      vy: 0,
-      image: data.image || null, // Store the image data URL
-    }];
-    socket.emit('initialState', { players, world: { width: WORLD_WIDTH, height: WORLD_HEIGHT } });
-    socket.broadcast.emit('newPlayer', { id: socket.id, data: players[socket.id] });
-  });
-
-  socket.on('disconnect', () => {
-    if (players[socket.id]) {
-      console.log(`Player ${players[socket.id][0].nickname} disconnected.`);
-      delete players[socket.id];
-      io.emit('playerDisconnected', socket.id);
-    } else {
-      console.log('User disconnected before joining.');
-    }
-  });
-
-  socket.on('playerMovement', (movementData) => {
-    const playerCells = players[socket.id];
-    if (playerCells) {
-      movementData.forEach(clientCell => {
-        const serverCell = playerCells.find(c => c.cellId === clientCell.cellId);
-        if (serverCell) {
-          serverCell.x = clientCell.x;
-          serverCell.y = clientCell.y;
-        }
-      });
-    }
-  });
-
-  socket.on('split', (data) => {
-    const playerCells = players[socket.id];
-    if (!playerCells || !data || !data.direction) return;
-
-    const dir = data.direction;
-    const len = Math.hypot(dir.x, dir.y);
-    if (len === 0) return;
-    const dx = dir.x / len;
-    const dy = dir.y / len;
-
-    const cellsToSplit = playerCells.length;
-    for (let i = 0; i < cellsToSplit; i++) {
-        const cell = playerCells[i];
-        if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
-            const halfScore = cell.score / 2;
-            cell.score = halfScore;
-            const newRadius = getRadiusFromScore(halfScore);
-            cell.radius = newRadius;
-            const launchSpeed = newRadius * 15;
-            const newCell = { ...cell, cellId: cellIdCounter++, score: halfScore, radius: newRadius, x: cell.x + dx * (newRadius + 5), y: cell.y + dy * (newRadius + 5), mergeCooldown: Date.now() + PLAYER_MERGE_TIME, launch_vx: dx * launchSpeed, launch_vy: dy * launchSpeed };
-            cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
-            playerCells.push(newCell);
-        }
-    }
-  });
-
-  // --- FIX: Added listener for ejecting mass ---
-  socket.on('ejectMass', (data) => {
-    const playerCells = players[socket.id];
-    if (!playerCells || !data || !data.direction) return;
-
-    const dir = data.direction;
-    const len = Math.hypot(dir.x, dir.y);
-    if (len === 0) return;
-    const dx = dir.x / len;
-    const dy = dir.y / len;
-
-    playerCells.forEach(cell => {
-      if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
-        cell.score -= EJECTED_MASS_SCORE;
-        cell.radius = getRadiusFromScore(cell.score);
-
-        const newDud = {
-          x: cell.x + dx * (cell.radius + 5), // Position it just outside the new radius
-          y: cell.y + dy * (cell.radius + 5),
-          score: EJECTED_MASS_SCORE,
-          radius: EJECTED_MASS_RADIUS,
-          color: cell.image ? cell.color : cell.color, // Use player's color for the dud
-          image: cell.image, // Pass image along to ejected mass
-          nickname: '',
-          id: DUD_PLAYER_ID,
-          cellId: cellIdCounter++,
-          launch_vx: dx * EJECT_LAUNCH_SPEED,
-          launch_vy: dy * EJECT_LAUNCH_SPEED,
+    socket.on('joinGame', (data) => {
+        console.log(`Player ${data.nickname} (${socket.id}) joined.`);
+        const halfWidth = WORLD_WIDTH / 2;
+        const halfHeight = WORLD_HEIGHT / 2;
+        players[socket.id] = [{
+            x: Math.floor(Math.random() * WORLD_WIDTH) - halfWidth,
+            y: Math.floor(Math.random() * WORLD_HEIGHT) - halfHeight,
+            score: PLAYER_START_SCORE,
+            radius: getRadiusFromScore(PLAYER_START_SCORE),
+            color: data.color || '#ffffff',
+            nickname: data.nickname || 'Player',
+            type: 'player', // FIX: Add missing type property
+            id: socket.id,
+            cellId: cellIdCounter++,
+            vx: 0,
+            vy: 0,
+            image: data.image || null,
+            mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+        }];
+        playerInputs[socket.id] = {
+            worldMouseX: players[socket.id][0].x,
+            worldMouseY: players[socket.id][0].y
         };
-        players[DUD_PLAYER_ID].push(newDud);
-      }
+
+        socket.emit('initialState', {
+            players: players,
+            world: {
+                width: WORLD_WIDTH,
+                height: WORLD_HEIGHT
+            }
+        });
     });
-  });
+
+    socket.on('disconnect', () => {
+        if (players[socket.id]) {
+            console.log(`Player ${players[socket.id][0].nickname} disconnected.`);
+            delete players[socket.id];
+            delete playerInputs[socket.id];
+            io.emit('playerDisconnected', socket.id);
+        } else {
+            console.log('User disconnected before joining.');
+        }
+    });
+
+    socket.on('playerInput', (input) => {
+        const {
+            worldMouseX,
+            worldMouseY
+        } = input;
+        if (typeof worldMouseX === 'number' && typeof worldMouseY === 'number') {
+            playerInputs[socket.id] = {
+                worldMouseX,
+                worldMouseY
+            };
+        }
+    });
+
+    socket.on('split', (data) => {
+        const playerCells = players[socket.id];
+        if (!playerCells || !data || !data.direction) return;
+        const dir = data.direction;
+        const len = Math.hypot(dir.x, dir.y);
+        if (len === 0) return;
+        const dx = dir.x / len;
+        const dy = dir.y / len;
+        const cellsToSplit = playerCells.length;
+
+        for (let i = cellsToSplit - 1; i >= 0; i--) {
+            const cell = playerCells[i];
+            if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
+                const halfScore = cell.score / 2;
+                cell.score = halfScore;
+
+                const newRadius = getRadiusFromScore(halfScore);
+                cell.radius = newRadius;
+                const launchSpeed = newRadius * 15;
+                const newCell = {
+                    ...cell,
+                    cellId: cellIdCounter++,
+                    score: halfScore,
+                    radius: newRadius,
+                    x: cell.x + dx * (newRadius + 5),
+                    y: cell.y + dy * (newRadius + 5),
+                    mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                    launch_vx: dx * launchSpeed,
+                    launch_vy: dy * launchSpeed
+                };
+                cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
+                playerCells.push(newCell);
+            }
+        }
+    });
+
+    socket.on('ejectMass', (data) => {
+        const playerCells = players[socket.id];
+        if (!playerCells || !data || !data.direction) return;
+        const dir = data.direction;
+        const len = Math.hypot(dir.x, dir.y);
+        if (len === 0) return;
+        const dx = dir.x / len;
+        const dy = dir.y / len;
+        playerCells.forEach(cell => {
+            if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
+                cell.score -= EJECTED_MASS_SCORE;
+                cell.radius = getRadiusFromScore(cell.score);
+                const newDud = {
+                    x: cell.x + dx * (cell.radius + 5),
+                    y: cell.y + dy * (cell.radius + 5),
+                    score: EJECTED_MASS_SCORE,
+                    radius: EJECTED_MASS_RADIUS,
+                    color: cell.color,
+                    nickname: '',
+                    type: 'ejected', // Add type for ejected mass
+                    id: DUD_PLAYER_ID,
+                    ownerId: cell.id,
+                    cellId: cellIdCounter++,
+                    launch_vx: dx * EJECT_LAUNCH_SPEED,
+                    launch_vy: dy * EJECT_LAUNCH_SPEED,
+                };
+                players[DUD_PLAYER_ID].push(newDud);
+            }
+        });
+    });
 });
 
-// Server Game Loop
+// Game Logic Loop (runs at 60Hz)
 setInterval(() => {
+    // Phase 1: Player Movement
+    for (const playerId in players) {
+        if (playerId === DUD_PLAYER_ID) continue;
+        const playerCells = players[playerId];
+        const input = playerInputs[playerId];
+
+        if (playerCells && input) {
+            playerCells.forEach(cell => {
+                const speed = 5;
+                const speedFactor = 20 / cell.radius;
+
+                let dx = input.worldMouseX - cell.x;
+                let dy = input.worldMouseY - cell.y;
+                const len = Math.hypot(dx, dy);
+
+                if (len > cell.radius) {
+                    const normalizedX = dx / len;
+                    const normalizedY = dy / len;
+                    cell.x += normalizedX * speed * speedFactor;
+                    cell.y += normalizedY * speed * speedFactor;
+                }
+            });
+        }
+    }
+
+    // Phase 2: Handle launched cells
     for (const playerId in players) {
         for (const cell of players[playerId]) {
-            if (cell.launch_vx) {
+            if (cell.launch_vx !== undefined && cell.launch_vy !== undefined) {
                 cell.x += cell.launch_vx * (1 / 60);
                 cell.y += cell.launch_vy * (1 / 60);
                 cell.launch_vx *= PLAYER_SPLIT_LAUNCH_DECAY;
                 cell.launch_vy *= PLAYER_SPLIT_LAUNCH_DECAY;
+
                 if (Math.hypot(cell.launch_vx, cell.launch_vy) < 1) {
-                    delete cell.launch_vx; delete cell.launch_vy;
+                    delete cell.launch_vx;
+                    delete cell.launch_vy;
                 }
             }
         }
     }
 
+    // Phase 3: Consumption Detection
     const allCells = Object.values(players).flat();
-    const eatenCellIds = new Set();
+    const consumptions = [];
+    const involvedCellIds = new Set();
 
     for (let i = 0; i < allCells.length; i++) {
         for (let j = i + 1; j < allCells.length; j++) {
-            const c1 = allCells[i]; const c2 = allCells[j];
-            // --- FIX: Logic below is heavily modified for virus interaction ---
+            const c1 = allCells[i];
+            const c2 = allCells[j];
+
             if (c1.id === c2.id) continue;
-            if (eatenCellIds.has(c1.cellId) || eatenCellIds.has(c2.cellId)) continue;
-            
+            if (involvedCellIds.has(c1.cellId) || involvedCellIds.has(c2.cellId)) continue;
+
             const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
-            let bigger, smaller;
-            if (c1.radius > c2.radius) { bigger = c1; smaller = c2; } else { bigger = c2; smaller = c1; }
 
-            // Viruses cannot eat players
-            if (bigger.type === 'virus' && smaller.id !== DUD_PLAYER_ID) {
-                continue;
+            // FIX: Handle virus-player interactions properly
+            if ((c1.type === 'virus' && c2.type === 'player') ||
+                (c1.type === 'player' && c2.type === 'virus')) {
+
+                const virus = c1.type === 'virus' ? c1 : c2;
+                const player = c1.type === 'player' ? c1 : c2;
+
+                // Check if player touches virus
+                if (distance < virus.radius + player.radius) {
+                    // Player must be large enough to trigger virus split
+                    if (player.score > virus.score * 1.1) {
+                        consumptions.push({
+                            virus: virus,
+                            player: player,
+                            type: 'virusPlayerInteraction'
+                        });
+                        involvedCellIds.add(virus.cellId);
+                        involvedCellIds.add(player.cellId);
+                    }
+                }
+                continue; // Skip regular consumption logic for virus-player interactions
             }
-            
+
+            // Regular consumption logic for non-virus interactions
+            let bigger, smaller;
+            if (c1.radius > c2.radius) {
+                bigger = c1;
+                smaller = c2;
+            } else {
+                bigger = c2;
+                smaller = c1;
+            }
+
             const requiredDistance = bigger.radius - (smaller.radius * CELL_CONSUME_THRESHOLD);
+
             if (distance < requiredDistance && bigger.radius > smaller.radius * 1.1) {
-                // A consumption event is happening
-
-                // Case 1: Player eats a virus
-                if (bigger.id !== DUD_PLAYER_ID && smaller.type === 'virus') {
-                    const ownerCells = players[bigger.id];
-
-                    if (ownerCells.length < 16) {
-                        // --- EXPLOSION LOGIC ---
-                        const cellToExplode = ownerCells.find(c => c.cellId === bigger.cellId);
-                        if (cellToExplode) {
-                            cellToExplode.score += VIRUS_CONSUME_SCORE_GAIN_SPLIT;
-                            let cellsToCreate = 16 - ownerCells.length;
-                            const maxSplitsFromOne = 7; // Prevent creating too many tiny cells at once
-                            cellsToCreate = Math.min(cellsToCreate, maxSplitsFromOne);
-                            const scoreAfterSplit = cellToExplode.score / (cellsToCreate + 1);
-
-                            if (scoreAfterSplit >= 1 && cellsToCreate > 0) {
-                                const finalScore = scoreAfterSplit;
-                                const newRadius = getRadiusFromScore(finalScore);
-                                cellToExplode.score = finalScore;
-                                cellToExplode.radius = newRadius;
-                                cellToExplode.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
-                                
-                                for (let k = 0; k < cellsToCreate; k++) {
-                                    const angle = Math.random() * 2 * Math.PI;
-                                    const dx = Math.cos(angle);
-                                    const dy = Math.sin(angle);
-                                    const launchSpeed = newRadius * 15;
-                                    ownerCells.push({
-                                        ...cellToExplode,
-                                        cellId: cellIdCounter++, score: finalScore, radius: newRadius,
-                                        x: cellToExplode.x, y: cellToExplode.y,
-                                        mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-                                        launch_vx: dx * launchSpeed, launch_vy: dy * launchSpeed,
-                                    });
-                                }
-                            } else {
-                                cellToExplode.radius = getRadiusFromScore(cellToExplode.score);
-                            }
-                        }
-                    } else {
-                        // --- NORMAL VIRUS CONSUMPTION (>16 cells) ---
-                        bigger.score += smaller.score; // gain 100 points
-                        bigger.radius = getRadiusFromScore(bigger.score);
-                    }
-                } else {
-                    // Case 2: Generic consumption (player-eats-player, player-eats-pellet)
-                    bigger.score += smaller.score;
-                    bigger.radius = getRadiusFromScore(bigger.score);
-                }
-
-                // This logic runs for ALL consumptions to remove the 'smaller' cell
-                eatenCellIds.add(smaller.cellId);
-                const ownerId = smaller.id;
-                if (players[ownerId]) {
-                    players[ownerId] = players[ownerId].filter(c => c.cellId !== smaller.cellId);
-                    if (players[ownerId].length === 0 && ownerId !== DUD_PLAYER_ID) {
-                        const finalScore = Math.round(smaller.score); // Score of the last cell
-                        io.to(ownerId).emit('youDied', { score: Math.max(1, finalScore) });
-                        delete players[ownerId];
-                        io.emit('playerDisconnected', ownerId);
-                    }
-                }
-                // --- End of modified logic ---
+                consumptions.push({ bigger, smaller, type: 'regularConsumption' });
+                involvedCellIds.add(bigger.cellId);
+                involvedCellIds.add(smaller.cellId);
             }
         }
     }
 
+    // Phase 3.5: Consumption Resolution
+    for (const consumption of consumptions) {
+        if (consumption.type === 'virusPlayerInteraction') {
+            const { virus, player } = consumption;
+
+            // Player splits into multiple cells when touching virus
+            const splitCount = Math.min(16, Math.floor(player.score / VIRUS_CONSUME_SCORE_GAIN_SPLIT));
+            const newCellScore = player.score / splitCount;
+
+            const newCells = [];
+            for (let i = 0; i < splitCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const spawnDistance = player.radius + 10;
+                newCells.push({
+                    ...player,
+                    cellId: cellIdCounter++,
+                    score: newCellScore,
+                    radius: getRadiusFromScore(newCellScore),
+                    x: player.x + Math.cos(angle) * spawnDistance,
+                    y: player.y + Math.sin(angle) * spawnDistance,
+                    mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                    launch_vx: Math.cos(angle) * 50,
+                    launch_vy: Math.sin(angle) * 50,
+                });
+            }
+
+            // Replace the single large cell with multiple smaller ones
+            const playerCells = players[player.id];
+            const playerIndex = playerCells.findIndex(c => c.cellId === player.cellId);
+            if (playerIndex !== -1) {
+                playerCells.splice(playerIndex, 1, ...newCells);
+            }
+
+            // Remove the consumed virus
+            players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+
+        } else { // Regular consumption
+            const { bigger, smaller } = consumption;
+            const ownerCells = players[bigger.id];
+            if (ownerCells) {
+                const biggerCell = ownerCells.find(c => c.cellId === bigger.cellId);
+                if (biggerCell) {
+                    biggerCell.score += smaller.score;
+                    biggerCell.radius = getRadiusFromScore(biggerCell.score);
+                }
+            }
+
+            // Remove the consumed cell
+            const smallerOwnerId = smaller.id;
+            if (players[smallerOwnerId]) {
+                players[smallerOwnerId] = players[smallerOwnerId].filter(c => c.cellId !== smaller.cellId);
+
+                if (players[smallerOwnerId].length === 0 && smallerOwnerId !== DUD_PLAYER_ID) {
+                    io.to(smallerOwnerId).emit('youDied', { score: Math.max(1, Math.round(smaller.score)) });
+                    delete players[smallerOwnerId];
+                    delete playerInputs[smallerOwnerId];
+                    io.emit('playerDisconnected', smallerOwnerId);
+                }
+            }
+        }
+    }
+
+    // Phase 4: Handle player cell merging and repulsion
     for (const playerId in players) {
-        if (playerId === DUD_PLAYER_ID) continue; // Duds don't have merge/repulsion logic
+        if (playerId === DUD_PLAYER_ID) continue;
         const playerCells = players[playerId];
-        
+
         for (let i = 0; i < playerCells.length; i++) {
+            const c1 = playerCells[i];
+            if (!c1) continue;
+
             for (let j = i + 1; j < playerCells.length; j++) {
-                const c1 = playerCells[i]; const c2 = playerCells[j];
+                const c2 = playerCells[j];
+                if (!c2) continue;
+
                 const now = Date.now();
                 const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+                const combinedRadius = c1.radius + c2.radius;
+
+                // Both cells are past their merge cooldown - they can merge
                 if (c1.mergeCooldown <= now && c2.mergeCooldown <= now) {
-                    if (distance < c1.radius || distance < c2.radius) {
-                        c1.score += c2.score; c1.radius = getRadiusFromScore(c1.score); playerCells.splice(j, 1); j--;
+                    // Merge when cells are touching or overlapping (much more lenient)
+                    if (distance < combinedRadius * 0.9) { // 90% of combined radius = light overlap
+                        // Merge the cells
+                        const originalC1Score = c1.score;
+                        c1.score += c2.score;
+                        c1.radius = getRadiusFromScore(c1.score);
+
+                        // Position merged cell at weighted center based on mass
+                        const totalScore = c1.score;
+                        const weight1 = originalC1Score / totalScore;
+                        const weight2 = c2.score / totalScore;
+                        c1.x = c1.x * weight1 + c2.x * weight2;
+                        c1.y = c1.y * weight1 + c2.y * weight2;
+
+                        // Remove the merged cell
+                        playerCells.splice(j, 1);
+                        j--; // Adjust index
+
+                        // Keep the maximum cooldown of the two cells instead of resetting
+                        // This prevents merge penalty when cells are reuniting
+                        c1.mergeCooldown = Math.max(c1.mergeCooldown, c2.mergeCooldown);
+                        continue; // Skip repulsion since we merged
                     }
-                } else {
-                    const totalRadius = c1.radius + c2.radius;
-                    if (distance < totalRadius) {
-                        const overlap = totalRadius - distance; const mass1 = c1.score + CELL_BASE_MASS; const mass2 = c2.score + CELL_BASE_MASS; const totalMass = mass1 + mass2; const move1 = (overlap * mass2 / totalMass); const move2 = (overlap * mass1 / totalMass); const dx = (c1.x - c2.x) / (distance || 1); const dy = (c1.y - c2.y) / (distance || 1);
-                        c1.x += dx * move1; c1.y += dy * move1; c2.x -= dx * move2; c2.y -= dy * move2;
+                }
+
+                // Repulsion logic - applies when cells are overlapping and can't/shouldn't merge
+                if (distance < combinedRadius) {
+                    const overlap = combinedRadius - distance;
+
+                    // Calculate masses for realistic repulsion
+                    const mass1 = c1.score + CELL_BASE_MASS;
+                    const mass2 = c2.score + CELL_BASE_MASS;
+                    const totalMass = mass1 + mass2;
+
+                    // Much stronger repulsion force during cooldown
+                    const isInCooldown = c1.mergeCooldown > now || c2.mergeCooldown > now;
+                    const baseForceMultiplier = isInCooldown ? 5.0 : 2.0; // Very strong during cooldown
+                    const repulsionForce = overlap * baseForceMultiplier;
+
+                    // Calculate movement based on inverse mass proportion
+                    const move1 = (repulsionForce * mass2 / totalMass);
+                    const move2 = (repulsionForce * mass1 / totalMass);
+
+                    // Calculate direction
+                    let dx, dy;
+                    if (distance > 0.001) { // Very small threshold to avoid division by zero
+                        dx = (c1.x - c2.x) / distance;
+                        dy = (c1.y - c2.y) / distance;
+                    } else {
+                        // If cells are exactly on top of each other, push in random directions
+                        const angle = Math.random() * Math.PI * 2;
+                        dx = Math.cos(angle);
+                        dy = Math.sin(angle);
+                    }
+
+                    // Apply repulsion movement
+                    c1.x += dx * move1;
+                    c1.y += dy * move1;
+                    c2.x -= dx * move2;
+                    c2.y -= dy * move2;
+
+                    // Ensure minimum separation - especially important during cooldown
+                    const minSeparationMultiplier = isInCooldown ? 1.15 : 1.05; // More separation during cooldown
+                    const minSeparation = combinedRadius * minSeparationMultiplier;
+                    const newDistance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+
+                    if (newDistance < minSeparation) {
+                        const additionalSeparation = minSeparation - newDistance;
+                        const additionalMove1 = (additionalSeparation * mass2 / totalMass) * 0.5;
+                        const additionalMove2 = (additionalSeparation * mass1 / totalMass) * 0.5;
+
+                        // Recalculate direction with new positions
+                        const newDx = newDistance > 0.001 ? (c1.x - c2.x) / newDistance : dx;
+                        const newDy = newDistance > 0.001 ? (c1.y - c2.y) / newDistance : dy;
+
+                        c1.x += newDx * additionalMove1;
+                        c1.y += newDy * additionalMove1;
+                        c2.x -= newDx * additionalMove2;
+                        c2.y -= newDy * additionalMove2;
                     }
                 }
             }
         }
-        const halfWidth = WORLD_WIDTH / 2; const halfHeight = WORLD_HEIGHT / 2;
+
+        // Clamp player cells to world boundaries
+        const halfWidth = WORLD_WIDTH / 2;
+        const halfHeight = WORLD_HEIGHT / 2;
         for (const cell of playerCells) {
-             cell.x = Math.max(-halfWidth + cell.radius, Math.min(halfWidth - cell.radius, cell.x));
-             cell.y = Math.max(-halfHeight + cell.radius, Math.min(halfHeight - cell.radius, cell.y));
+            cell.x = Math.max(-halfWidth + cell.radius, Math.min(halfWidth - cell.radius, cell.x));
+            cell.y = Math.max(-halfHeight + cell.radius, Math.min(halfHeight - cell.radius, cell.y));
         }
     }
-    
-    // --- FIX: Updated respawn logic for pellets and viruses ---
+
+    // Phase 5: Respawn duds
     const dudCells = players[DUD_PLAYER_ID] || [];
-    const pelletCount = dudCells.filter(c => c.type === 'pellet').length;
-    if (pelletCount < PELLET_COUNT) {
+    if (dudCells.filter(c => c.type === 'pellet').length < PELLET_COUNT) {
         players[DUD_PLAYER_ID].push(createPellet());
     }
-    const virusCount = dudCells.filter(c => c.type === 'virus').length;
-    if (virusCount < VIRUS_COUNT) {
+    if (dudCells.filter(c => c.type === 'virus').length < VIRUS_COUNT) {
         players[DUD_PLAYER_ID].push(createVirus());
     }
-
-    io.emit('gameState', players);
 }, 1000 / 60);
 
+// Network Broadcast Loop (runs at 30Hz)
+setInterval(() => {
+    if (Object.keys(players).length === 0) return;
+
+    const updatePackage = {
+        updatedCells: [],
+        newCells: [],
+        eatenCellIds: [],
+    };
+
+    const currentCellIds = new Set();
+    const allCurrentCells = Object.values(players).flat();
+
+    for (const cell of allCurrentCells) {
+        currentCellIds.add(cell.cellId);
+        const oldCellState = lastBroadcastState[cell.cellId];
+
+        const broadcastCell = { ...cell };
+        delete broadcastCell.image;
+        delete broadcastCell.launch_vx;
+        delete broadcastCell.launch_vy;
+        // Keep mergeCooldown for debug purposes on client
+        // delete broadcastCell.mergeCooldown;
+
+        if (!oldCellState) {
+            updatePackage.newCells.push(broadcastCell);
+        } else {
+            if (Math.abs(cell.x - oldCellState.x) > 0.1 ||
+                Math.abs(cell.y - oldCellState.y) > 0.1 ||
+                Math.abs(cell.radius - oldCellState.radius) > 0.1) {
+                updatePackage.updatedCells.push(broadcastCell);
+            }
+        }
+    }
+
+    for (const cellId in lastBroadcastState) {
+        if (!currentCellIds.has(parseInt(cellId))) {
+            updatePackage.eatenCellIds.push(parseInt(cellId));
+        }
+    }
+
+    if (updatePackage.newCells.length > 0 || updatePackage.updatedCells.length > 0 || updatePackage.eatenCellIds.length > 0) {
+        io.emit('gameStateUpdate', updatePackage);
+    }
+
+    lastBroadcastState = {};
+    allCurrentCells.forEach(cell => {
+        lastBroadcastState[cell.cellId] = {
+            x: cell.x,
+            y: cell.y,
+            radius: cell.radius
+        };
+    });
+}, 1000 / 30);
+
 server.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
+    console.log(`🚀 Server listening on port ${PORT}`);
 });
