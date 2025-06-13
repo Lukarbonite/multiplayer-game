@@ -12,6 +12,7 @@
     <div class="start-form">
         <h1>Join the Game</h1>
         <p id="final-score" class="hidden"></p>
+        <!-- MODIFIED: Removed readonly attribute. JS will now handle it. -->
         <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
         <label for="color-picker">Choose your color:</label>
         <input type="color" id="color-picker" value="#3498db">
@@ -34,6 +35,13 @@
             <input type="text" id="chat-input" placeholder="Press Enter to chat..." maxlength="100">
         </div>
     </div>
+</div>
+
+<!-- Custom Mobile Keyboard -->
+<div id="mobile-keyboard">
+    <!-- Close button is now a direct child, positioned with CSS -->
+    <button id="keyboard-close">✕</button>
+    <div id="keyboard-keys"></div>
 </div>
 
 <canvas id="gameCanvas"></canvas>

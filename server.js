@@ -18,19 +18,19 @@ const io = socketIo(server, {
 const PORT = 3000;
 const WORLD_WIDTH = 4000;
 const WORLD_HEIGHT = 4000;
-const PELLET_COUNT = 400;
-const PELLET_RADIUS = 5;
-const VIRUS_COUNT = 20;
+const PELLET_COUNT = 1000;
+const PELLET_RADIUS = 10;
+const VIRUS_COUNT = 50;
 
-const PLAYER_START_SCORE = 1;
+const PLAYER_START_SCORE = 10;
 const CELL_BASE_MASS = 399;
-const PELLET_SCORE_VALUE = 5;
-const PLAYER_MIN_SPLIT_SCORE = 50;
+const PELLET_SCORE_VALUE = 1;
+const PLAYER_MIN_SPLIT_SCORE = 2;
 const CELL_CONSUME_THRESHOLD = 0.5;
 
 const PLAYER_MERGE_TIME = 15000;
 const PLAYER_SPLIT_LAUNCH_DECAY = 0.94;
-const PLAYER_MIN_EJECT_SCORE = 50;
+const PLAYER_MIN_EJECT_SCORE = 11;
 const EJECTED_MASS_SCORE = 10;
 const EJECTED_MASS_RADIUS = 10;
 
@@ -192,6 +192,34 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('setMass', (data) => {
+        const playerCells = players[socket.id];
+        if (!playerCells || !data || typeof data.mass !== 'number') return;
+
+        const newMass = Math.max(1, Math.min(10000, data.mass)); // Clamp between 1 and 10000
+        const player = playerCells[0]; // Get first cell for nickname
+
+        console.log(`Setting mass for ${player.nickname} to ${newMass}`);
+
+        // Update all player cells to the new mass
+        playerCells.forEach(cell => {
+            cell.score = newMass;
+            cell.radius = getRadiusFromScore(newMass);
+        });
+
+        // Send confirmation message to player
+        socket.emit('systemMessage', {
+            message: `Mass set to ${newMass}`,
+            timestamp: Date.now()
+        });
+
+        // Optionally broadcast to all players that this player's mass changed
+        io.emit('systemMessage', {
+            message: `${player.nickname} set their mass to ${newMass}`,
+            timestamp: Date.now()
+        });
+    });
+
     socket.on('playerInput', (input) => {
         const {
             worldMouseX,
@@ -218,17 +246,20 @@ io.on('connection', (socket) => {
         for (let i = cellsToSplit - 1; i >= 0; i--) {
             const cell = playerCells[i];
             if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
-                const halfScore = cell.score / 2;
-                cell.score = halfScore;
+                // MODIFIED: Split mass into integers, giving extra to the new cell
+                const score1 = Math.floor(cell.score / 2);
+                const score2 = cell.score - score1; // This ensures no mass is lost
 
-                const newRadius = getRadiusFromScore(halfScore);
+                cell.score = score1; // Original cell gets the smaller (or equal) half
+
+                const newRadius = getRadiusFromScore(score1);
                 cell.radius = newRadius;
                 const launchSpeed = newRadius * 15;
                 const newCell = {
                     ...cell,
                     cellId: cellIdCounter++,
-                    score: halfScore,
-                    radius: newRadius,
+                    score: score2, // New cell gets the larger (or equal) half
+                    radius: getRadiusFromScore(score2),
                     x: cell.x + dx * (newRadius + 5),
                     y: cell.y + dy * (newRadius + 5),
                     mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
@@ -332,30 +363,28 @@ setInterval(() => {
 
             const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
 
-            // FIX: Handle virus-player interactions properly
+            // MODIFIED: Handle virus-player interactions
             if ((c1.type === 'virus' && c2.type === 'player') ||
                 (c1.type === 'player' && c2.type === 'virus')) {
 
                 const virus = c1.type === 'virus' ? c1 : c2;
                 const player = c1.type === 'player' ? c1 : c2;
 
-                // Check if player touches virus
-                if (distance < virus.radius + player.radius) {
-                    // Player must be large enough to trigger virus split
-                    if (player.score > virus.score * 1.1) {
-                        consumptions.push({
-                            virus: virus,
-                            player: player,
-                            type: 'virusPlayerInteraction'
-                        });
-                        involvedCellIds.add(virus.cellId);
-                        involvedCellIds.add(player.cellId);
-                    }
+                // Player must be large enough to consume the virus. For consumption to occur,
+                // the player cell's outer edge must pass the center of the virus.
+                if (player.score > virus.score * 1.1 && distance < player.radius) {
+                    consumptions.push({
+                        virus: virus,
+                        player: player,
+                        type: 'virusPlayerInteraction'
+                    });
+                    involvedCellIds.add(virus.cellId);
+                    involvedCellIds.add(player.cellId);
                 }
                 continue; // Skip regular consumption logic for virus-player interactions
             }
 
-            // Regular consumption logic for non-virus interactions
+            // MODIFIED: Regular consumption logic for non-virus interactions
             let bigger, smaller;
             if (c1.radius > c2.radius) {
                 bigger = c1;
@@ -365,7 +394,8 @@ setInterval(() => {
                 smaller = c1;
             }
 
-            const requiredDistance = bigger.radius - (smaller.radius * CELL_CONSUME_THRESHOLD);
+            // To consume, the bigger cell's edge must pass the smaller cell's center.
+            const requiredDistance = bigger.radius;
 
             if (distance < requiredDistance && bigger.radius > smaller.radius * 1.1) {
                 consumptions.push({ bigger, smaller, type: 'regularConsumption' });
@@ -379,37 +409,84 @@ setInterval(() => {
     for (const consumption of consumptions) {
         if (consumption.type === 'virusPlayerInteraction') {
             const { virus, player } = consumption;
-
-            // Player splits into multiple cells when touching virus
-            const splitCount = Math.min(16, Math.floor(player.score / VIRUS_CONSUME_SCORE_GAIN_SPLIT));
-            const newCellScore = player.score / splitCount;
-
-            const newCells = [];
-            for (let i = 0; i < splitCount; i++) {
-                const angle = Math.random() * Math.PI * 2;
-                const spawnDistance = player.radius + 10;
-                newCells.push({
-                    ...player,
-                    cellId: cellIdCounter++,
-                    score: newCellScore,
-                    radius: getRadiusFromScore(newCellScore),
-                    x: player.x + Math.cos(angle) * spawnDistance,
-                    y: player.y + Math.sin(angle) * spawnDistance,
-                    mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-                    launch_vx: Math.cos(angle) * 50,
-                    launch_vy: Math.sin(angle) * 50,
-                });
-            }
-
-            // Replace the single large cell with multiple smaller ones
             const playerCells = players[player.id];
-            const playerIndex = playerCells.findIndex(c => c.cellId === player.cellId);
-            if (playerIndex !== -1) {
-                playerCells.splice(playerIndex, 1, ...newCells);
-            }
+            const playerCellCount = playerCells.length;
 
-            // Remove the consumed virus
-            players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+            // Case 1: Player is at or above the cell limit. Absorb virus for score.
+            if (playerCellCount >= 16) {
+                // Find the specific cell that hit the virus
+                const hittingCell = playerCells.find(c => c.cellId === player.cellId);
+                if (hittingCell) {
+                    hittingCell.score += virus.score; // Gain full virus score
+                    hittingCell.radius = getRadiusFromScore(hittingCell.score);
+                }
+
+                // Remove the consumed virus
+                players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+
+            } else {
+                // Case 2: Player has room to split.
+
+                // The cell that hit the virus
+                const hittingCell = playerCells.find(c => c.cellId === player.cellId);
+                if (!hittingCell) continue; // Should not happen, but a good guard
+
+                hittingCell.score += VIRUS_CONSUME_SCORE_GAIN_SPLIT; // Gain 10 points for splitting
+
+                // The number of pieces the hitting cell will shatter into.
+                const desiredSplitCount = Math.floor(hittingCell.score / PLAYER_MIN_SPLIT_SCORE) || 2;
+
+                // The number of additional cells we can create without exceeding the 16-cell limit.
+                const availableSlots = 16 - playerCellCount;
+                const additionalCellsToCreate = Math.min(desiredSplitCount - 1, availableSlots);
+                const finalSplitCount = additionalCellsToCreate + 1;
+
+                // If we can't even split into 2 pieces, just absorb the 10 points and don't split.
+                if (finalSplitCount <= 1) {
+                    players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+                    continue; // Skip to next consumption
+                }
+
+                // MODIFIED: Split the hitting cell's mass into integers
+                const totalScoreToSplit = hittingCell.score;
+                const baseScore = Math.floor(totalScoreToSplit / finalSplitCount);
+                let remainder = totalScoreToSplit % finalSplitCount;
+                const newCells = [];
+
+                for (let i = 0; i < finalSplitCount; i++) {
+                    // Distribute the remainder mass (1 point at a time) to the first 'remainder' cells
+                    const currentCellScore = baseScore + (remainder > 0 ? 1 : 0);
+                    if (remainder > 0) {
+                        remainder--;
+                    }
+
+                    const angle = Math.random() * Math.PI * 2;
+                    const launchSpeed = 50 + Math.random() * 100;
+
+                    newCells.push({
+                        // Copy fundamental properties from the cell that was hit
+                        ...hittingCell,
+                        // Overwrite with new properties for the new smaller cell
+                        cellId: cellIdCounter++,
+                        score: currentCellScore,
+                        radius: getRadiusFromScore(currentCellScore),
+                        x: hittingCell.x + Math.cos(angle) * (hittingCell.radius * 0.2), // spawn closer to center
+                        y: hittingCell.y + Math.sin(angle) * (hittingCell.radius * 0.2),
+                        mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                        launch_vx: Math.cos(angle) * launchSpeed,
+                        launch_vy: Math.sin(angle) * launchSpeed,
+                    });
+                }
+
+                // Replace the single large cell with multiple smaller ones
+                const playerIndex = playerCells.findIndex(c => c.cellId === hittingCell.cellId);
+                if (playerIndex !== -1) {
+                    playerCells.splice(playerIndex, 1, ...newCells);
+                }
+
+                // Remove the consumed virus
+                players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+            }
 
         } else { // Regular consumption
             const { bigger, smaller } = consumption;
