@@ -6,7 +6,14 @@ const socketIo = require('socket.io');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
+const io = socketIo(server, {
+    // Optimize Socket.IO for lower latency but allow fallbacks
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    // Removed transports restriction to allow fallback to polling if needed
+    upgrade: true,
+    allowEIO3: true
+});
 
 const PORT = 3000;
 const WORLD_WIDTH = 4000;
@@ -104,10 +111,10 @@ function initializeGameObjects() {
 initializeGameObjects();
 
 io.on('connection', (socket) => {
-    console.log('User connected, waiting for join:', socket.id);
+    console.log('User connected:', socket.id);
 
     socket.on('joinGame', (data) => {
-        console.log(`Player ${data.nickname} (${socket.id}) joined.`);
+        console.log(`Player ${data.nickname} (${socket.id}) joined successfully.`);
         const halfWidth = WORLD_WIDTH / 2;
         const halfHeight = WORLD_HEIGHT / 2;
         players[socket.id] = [{
@@ -130,6 +137,7 @@ io.on('connection', (socket) => {
             worldMouseY: players[socket.id][0].y
         };
 
+        console.log(`Sending initialState to ${socket.id}`);
         socket.emit('initialState', {
             players: players,
             world: {
@@ -137,16 +145,50 @@ io.on('connection', (socket) => {
                 height: WORLD_HEIGHT
             }
         });
+
+        // Send system message to all players about new player joining
+        io.emit('systemMessage', {
+            message: `${data.nickname} joined the game`,
+            timestamp: Date.now()
+        });
     });
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
+        console.log(`Socket ${socket.id} disconnected. Reason: ${reason}`);
         if (players[socket.id]) {
-            console.log(`Player ${players[socket.id][0].nickname} disconnected.`);
+            const playerNickname = players[socket.id][0].nickname;
+            console.log(`Player ${playerNickname} disconnected.`);
+
             delete players[socket.id];
             delete playerInputs[socket.id];
             io.emit('playerDisconnected', socket.id);
-        } else {
-            console.log('User disconnected before joining.');
+
+            // Send system message about player leaving
+            io.emit('systemMessage', {
+                message: `${playerNickname} left the game`,
+                timestamp: Date.now()
+            });
+        }
+    });
+
+    socket.on('connect_error', (error) => {
+        console.log('Connection error:', error);
+    });
+
+    socket.on('chatMessage', (data) => {
+        if (players[socket.id] && data.message && data.message.trim().length > 0) {
+            const player = players[socket.id][0]; // Get first cell for nickname
+            const message = data.message.trim().substring(0, 100); // Limit message length
+
+            console.log(`Chat from ${player.nickname}: ${message}`);
+
+            // Broadcast message to all players
+            io.emit('chatMessage', {
+                playerId: socket.id,
+                nickname: player.nickname,
+                message: message,
+                timestamp: Date.now()
+            });
         }
     });
 
@@ -414,9 +456,19 @@ setInterval(() => {
 
                 // Both cells are past their merge cooldown - they can merge
                 if (c1.mergeCooldown <= now && c2.mergeCooldown <= now) {
-                    // Merge when cells are touching or overlapping (much more lenient)
-                    if (distance < combinedRadius * 0.9) { // 90% of combined radius = light overlap
-                        // Merge the cells
+                    // Determine which cell is larger
+                    let bigger, smaller;
+                    if (c1.radius > c2.radius) {
+                        bigger = c1;
+                        smaller = c2;
+                    } else {
+                        bigger = c2;
+                        smaller = c1;
+                    }
+
+                    // Merge when larger cell touches the center of smaller cell
+                    if (distance < bigger.radius) {
+                        // Merge the cells (always merge into c1 for consistency)
                         const originalC1Score = c1.score;
                         c1.score += c2.score;
                         c1.radius = getRadiusFromScore(c1.score);
@@ -439,8 +491,10 @@ setInterval(() => {
                     }
                 }
 
-                // Repulsion logic - applies when cells are overlapping and can't/shouldn't merge
-                if (distance < combinedRadius) {
+                // Repulsion logic - ONLY applies when cells are in cooldown
+                const isInCooldown = c1.mergeCooldown > now || c2.mergeCooldown > now;
+
+                if (isInCooldown && distance < combinedRadius) {
                     const overlap = combinedRadius - distance;
 
                     // Calculate masses for realistic repulsion
@@ -448,10 +502,8 @@ setInterval(() => {
                     const mass2 = c2.score + CELL_BASE_MASS;
                     const totalMass = mass1 + mass2;
 
-                    // Much stronger repulsion force during cooldown
-                    const isInCooldown = c1.mergeCooldown > now || c2.mergeCooldown > now;
-                    const baseForceMultiplier = isInCooldown ? 5.0 : 2.0; // Very strong during cooldown
-                    const repulsionForce = overlap * baseForceMultiplier;
+                    // Gentle repulsion only during cooldown
+                    const repulsionForce = overlap * 1.5;
 
                     // Calculate movement based on inverse mass proportion
                     const move1 = (repulsionForce * mass2 / totalMass);
@@ -459,7 +511,7 @@ setInterval(() => {
 
                     // Calculate direction
                     let dx, dy;
-                    if (distance > 0.001) { // Very small threshold to avoid division by zero
+                    if (distance > 0.001) {
                         dx = (c1.x - c2.x) / distance;
                         dy = (c1.y - c2.y) / distance;
                     } else {
@@ -475,15 +527,14 @@ setInterval(() => {
                     c2.x -= dx * move2;
                     c2.y -= dy * move2;
 
-                    // Ensure minimum separation - especially important during cooldown
-                    const minSeparationMultiplier = isInCooldown ? 1.15 : 1.05; // More separation during cooldown
-                    const minSeparation = combinedRadius * minSeparationMultiplier;
+                    // Ensure minimum separation during cooldown
+                    const minSeparation = combinedRadius * 1.05;
                     const newDistance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
 
                     if (newDistance < minSeparation) {
                         const additionalSeparation = minSeparation - newDistance;
-                        const additionalMove1 = (additionalSeparation * mass2 / totalMass) * 0.5;
-                        const additionalMove2 = (additionalSeparation * mass1 / totalMass) * 0.5;
+                        const additionalMove1 = (additionalSeparation * mass2 / totalMass) * 0.2;
+                        const additionalMove2 = (additionalSeparation * mass1 / totalMass) * 0.2;
 
                         // Recalculate direction with new positions
                         const newDx = newDistance > 0.001 ? (c1.x - c2.x) / newDistance : dx;
@@ -497,13 +548,29 @@ setInterval(() => {
                 }
             }
         }
+    }
 
-        // Clamp player cells to world boundaries
-        const halfWidth = WORLD_WIDTH / 2;
-        const halfHeight = WORLD_HEIGHT / 2;
+    // UNIVERSAL BOUNDARY CLAMPING - Apply to ALL cells including ejected masses
+    const halfWidth = WORLD_WIDTH / 2;
+    const halfHeight = WORLD_HEIGHT / 2;
+
+    for (const playerId in players) {
+        const playerCells = players[playerId];
         for (const cell of playerCells) {
+            // Clamp all cells (players, ejected masses, pellets, viruses) to world boundaries
             cell.x = Math.max(-halfWidth + cell.radius, Math.min(halfWidth - cell.radius, cell.x));
             cell.y = Math.max(-halfHeight + cell.radius, Math.min(halfHeight - cell.radius, cell.y));
+
+            // If a launched cell hits the boundary, reduce its velocity to prevent bouncing
+            if (cell.launch_vx !== undefined && cell.launch_vy !== undefined) {
+                // If the cell is at the boundary, dampen the velocity in that direction
+                if (cell.x <= -halfWidth + cell.radius || cell.x >= halfWidth - cell.radius) {
+                    cell.launch_vx *= 0.3; // Reduce horizontal velocity when hitting side walls
+                }
+                if (cell.y <= -halfHeight + cell.radius || cell.y >= halfHeight - cell.radius) {
+                    cell.launch_vy *= 0.3; // Reduce vertical velocity when hitting top/bottom walls
+                }
+            }
         }
     }
 

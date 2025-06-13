@@ -7,24 +7,38 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Start Screen Overlay -->
-    <div id="start-screen">
-        <div class="start-form">
-            <h1>Join the Game</h1>
-            <p id="final-score" class="hidden"></p>
-            <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
-            <label for="color-picker">Choose your color:</label>
-            <input type="color" id="color-picker" value="#3498db">
-            <label for="image-picker">Or upload an image (replaces color):</label>
-            <input type="file" id="image-picker" accept="image/png, image/jpeg, image/gif">
-            <button id="play-button">Play</button>
-            <p id="error-message" class="hidden"></p>
+<!-- Start Screen Overlay -->
+<div id="start-screen">
+    <div class="start-form">
+        <h1>Join the Game</h1>
+        <p id="final-score" class="hidden"></p>
+        <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
+        <label for="color-picker">Choose your color:</label>
+        <input type="color" id="color-picker" value="#3498db">
+        <label for="image-picker">Or upload an image (replaces color):</label>
+        <input type="file" id="image-picker" accept="image/png, image/jpeg, image/gif">
+        <button id="play-button">Play</button>
+        <p id="error-message" class="hidden"></p>
+    </div>
+</div>
+
+<!-- Chat Console -->
+<div id="chat-console" class="hidden">
+    <div id="chat-header">
+        <span id="chat-title">Chat</span>
+        <button id="chat-toggle" onclick="toggleChat()">−</button>
+    </div>
+    <div id="chat-content">
+        <div id="chat-messages"></div>
+        <div id="chat-input-container">
+            <input type="text" id="chat-input" placeholder="Press Enter to chat..." maxlength="100">
         </div>
     </div>
+</div>
 
-    <canvas id="gameCanvas"></canvas>
+<canvas id="gameCanvas"></canvas>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script src="game.js"></script>
+<script src="/socket.io/socket.io.js"></script>
+<script src="game.js"></script>
 </body>
 </html>

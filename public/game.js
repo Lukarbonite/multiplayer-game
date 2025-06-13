@@ -9,6 +9,8 @@ let players = {};
 let imageCache = {};
 let world = { width: 4000, height: 4000 };
 let gameReady = false;
+let baseRadius = 20; // Store the starting radius for zoom calculations
+let debugMode = false; // Debug mode toggle (default off)
 
 const MINIMAP_SIZE = 200; // Default minimap size
 const MINIMAP_SIZE_MOBILE = 120; // Smaller minimap size for mobile
@@ -16,7 +18,7 @@ const MINIMAP_MARGIN = 20; // Default minimap margin
 const MINIMAP_DOT_SIZE = 4; // Default minimap dot size
 const DUD_PLAYER_ID = 'duds'; // ID for non-player objects
 const CAMERA_DEAD_ZONE_RADIUS = 100; // Camera dead zone radius
-let camera = { x: 0, y: 0 }; // Camera position
+let camera = { x: 0, y: 0, zoom: 1.0 }; // Camera position and zoom
 let mousePos = { x: 0, y: 0 }; // Mouse position
 
 // --- DOM Elements ---
@@ -27,6 +29,10 @@ const imagePicker = document.getElementById('image-picker'); // Image picker inp
 const playButton = document.getElementById('play-button'); // Play button
 const errorMessage = document.getElementById('error-message'); // Error message element
 const finalScoreElement = document.getElementById('final-score'); // Final score display
+const chatConsole = document.getElementById('chat-console'); // Chat console
+const chatMessages = document.getElementById('chat-messages'); // Chat messages container
+const chatInput = document.getElementById('chat-input'); // Chat input field
+// Don't declare chatToggle here since it might not exist yet
 
 
 // --- Start Screen & Game Initialization Logic ---
@@ -65,6 +71,7 @@ playButton.addEventListener('click', () => {
 
 function showStartScreen(score) {
     startScreen.style.display = 'flex';
+    chatConsole.classList.add('hidden'); // Hide chat when returning to start screen
     if (score) {
         finalScoreElement.textContent = `Your final score: ${score}`;
         finalScoreElement.classList.remove('hidden');
@@ -78,6 +85,7 @@ function showStartScreen(score) {
     players = {};
     imageCache = {}; // Clear image cache
     gameReady = false;
+    debugMode = false; // Reset debug mode when returning to start screen
     if (socket) {
         socket.disconnect();
     }
@@ -94,12 +102,39 @@ function processAndLoadImages(playerData) {
 }
 
 function initializeGame(nickname, color, imageDataUrl) {
+    console.log('Initializing game connection...');
+
+    // Set a timeout to reset if connection takes too long
+    const connectionTimeout = setTimeout(() => {
+        console.error('Connection timeout - resetting...');
+        showStartScreen();
+    }, 10000); // 10 second timeout
+
     socket = io();
+
     socket.on('connect', () => {
+        console.log('Socket connected successfully:', socket.id);
         selfId = socket.id;
+        console.log('Sending joinGame event...');
         socket.emit('joinGame', { nickname, color, image: imageDataUrl });
     });
+
+    socket.on('connect_error', (error) => {
+        console.error('Connection error:', error);
+        clearTimeout(connectionTimeout);
+        showStartScreen();
+    });
+
+    socket.on('disconnect', (reason) => {
+        console.log('Disconnected:', reason);
+        clearTimeout(connectionTimeout);
+        showStartScreen();
+    });
+
     socket.on('initialState', (state) => {
+        console.log('Received initialState:', state);
+        clearTimeout(connectionTimeout); // Clear timeout on successful connection
+
         players = state.players;
         world = state.world;
 
@@ -114,11 +149,24 @@ function initializeGame(nickname, color, imageDataUrl) {
         if (selfCells && selfCells.length > 0) {
             camera.x = selfCells[0].x;
             camera.y = selfCells[0].y;
+            camera.zoom = 4.0; // Start zoomed in at 4x
+            baseRadius = selfCells[0].radius * 4; // Set base to 4x starting radius for 4x initial zoom
             // Initialize mousePos to current player position on join for smooth start
             mousePos.x = selfCells[0].x;
             mousePos.y = selfCells[0].y;
         }
+        console.log('Game ready!');
         gameReady = true;
+        chatConsole.classList.remove('hidden'); // Show chat when game starts
+    });
+
+    // Chat message handlers
+    socket.on('chatMessage', (data) => {
+        addChatMessage(data.nickname, data.message, data.playerId === selfId);
+    });
+
+    socket.on('systemMessage', (data) => {
+        addSystemMessage(data.message);
     });
 
     socket.on('playerDisconnected', (id) => {
@@ -191,11 +239,14 @@ window.addEventListener('mousemove', (e) => {
 window.addEventListener('keydown', (e) => {
     if (!socket || !socket.connected || !gameReady || isMobileDevice()) return;
 
+    // If chat input is focused, don't process game controls
+    if (document.activeElement === chatInput) return;
+
     const selfCells = players[selfId];
     if (!selfCells || selfCells.length === 0) return;
 
-    const worldMouseX = mousePos.x - canvas.width / 2 + camera.x;
-    const worldMouseY = mousePos.y - canvas.height / 2 + camera.y;
+    const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+    const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
 
     let totalMass = 0; let playerCenterX = 0; let playerCenterY = 0;
     selfCells.forEach(cell => {
@@ -218,7 +269,98 @@ window.addEventListener('keydown', (e) => {
     } else if (e.code === 'KeyW') {
         e.preventDefault();
         socket.emit('ejectMass', { direction });
+    } else if (e.code === 'Enter') {
+        e.preventDefault();
+        chatInput.focus();
+    } else if (e.code === 'KeyC' && e.ctrlKey) {
+        e.preventDefault();
+        toggleChat(); // Ctrl+C to toggle chat (manual fallback)
     }
+});
+
+// --- Chat Event Listeners ---
+document.addEventListener('DOMContentLoaded', () => {
+    const chatToggleBtn = document.getElementById('chat-toggle');
+    if (chatToggleBtn) {
+        chatToggleBtn.addEventListener('click', () => {
+            console.log('Chat toggle clicked'); // Debug log
+            chatConsole.classList.toggle('collapsed');
+            chatToggleBtn.textContent = chatConsole.classList.contains('collapsed') ? '+' : '−';
+        });
+    }
+});
+
+// Alternative event listener setup (in case DOMContentLoaded doesn't work)
+setTimeout(() => {
+    const chatToggleBtn = document.getElementById('chat-toggle');
+    if (chatToggleBtn && !chatToggleBtn.hasAttribute('data-listener-added')) {
+        chatToggleBtn.setAttribute('data-listener-added', 'true');
+        chatToggleBtn.addEventListener('click', () => {
+            console.log('Chat toggle clicked (fallback)'); // Debug log
+            chatConsole.classList.toggle('collapsed');
+            chatToggleBtn.textContent = chatConsole.classList.contains('collapsed') ? '+' : '−';
+        });
+    }
+}, 1000);
+
+// --- Chat Commands Handler ---
+function handleChatCommand(command) {
+    const parts = command.toLowerCase().split(' ');
+    const cmd = parts[0];
+
+    switch (cmd) {
+        case '/debug':
+            debugMode = !debugMode;
+            addSystemMessage(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+            return true;
+
+        case '/help':
+            addSystemMessage('Available commands:');
+            addSystemMessage('/debug - Toggle debug information display');
+            addSystemMessage('/help - Show this help message');
+            addSystemMessage('');
+            addSystemMessage('Game controls:');
+            addSystemMessage('Mouse - Move your cell');
+            addSystemMessage('Space - Split cells');
+            addSystemMessage('W - Eject mass');
+            addSystemMessage('Enter - Open chat');
+            addSystemMessage('Ctrl+C - Toggle chat visibility');
+            return true;
+
+        default:
+            addSystemMessage(`Unknown command: ${cmd}. Type /help for available commands.`);
+            return true;
+    }
+}
+
+chatInput.addEventListener('keydown', (e) => {
+    if (e.code === 'Enter') {
+        e.preventDefault();
+        const message = chatInput.value.trim();
+        if (message && socket && socket.connected) {
+            // Check if it's a command
+            if (message.startsWith('/')) {
+                handleChatCommand(message);
+            } else {
+                // Send regular chat message
+                socket.emit('chatMessage', { message });
+            }
+            chatInput.value = '';
+            chatInput.blur(); // Remove focus after sending
+        }
+    } else if (e.code === 'Escape') {
+        e.preventDefault();
+        chatInput.blur();
+    }
+});
+
+// Prevent chat input from interfering with game
+chatInput.addEventListener('focus', () => {
+    // Disable game controls when typing
+});
+
+chatInput.addEventListener('blur', () => {
+    // Re-enable game controls when not typing
 });
 
 // --- Touch Controls (MODIFIED) ---
@@ -312,8 +454,8 @@ function setupTouchControls() {
         if (!selfCells || selfCells.length === 0) return;
 
         // Direction for split/eject should be based on current player center to the touch point
-        const worldMouseX = mousePos.x - canvas.width / 2 + camera.x;
-        const worldMouseY = mousePos.y - canvas.height / 2 + camera.y;
+        const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+        const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
 
         let totalMass = 0;
         let playerCenterX = 0;
@@ -376,7 +518,8 @@ function gameLoop() {
                 const normalizedStickX = stickOffsetX / maxStickDistance;
                 const normalizedStickY = stickOffsetY / maxStickDistance;
 
-                const effectiveMovementScale = 300;
+                // Scale target movement relative to camera, zoom, and player size
+                const effectiveMovementScale = 300 / camera.zoom; // Adjust for zoom
                 targetX = camera.x + normalizedStickX * effectiveMovementScale;
                 targetY = camera.y + normalizedStickY * effectiveMovementScale;
             } else {
@@ -386,8 +529,9 @@ function gameLoop() {
 
         } else if (!isMobileDevice()) {
             // For desktop, mousePos is already relative to the canvas viewport, convert to world coordinates
-            targetX = mousePos.x - canvas.width / 2 + camera.x;
-            targetY = mousePos.y - canvas.height / 2 + camera.y;
+            // Account for zoom when converting mouse coordinates
+            targetX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+            targetY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
         } else {
             // Mobile device but joystick is not active - don't send any input
             shouldSendInput = false;
@@ -451,17 +595,28 @@ function gameLoop() {
             }
         });
 
-        // --- Camera Logic ---
+        // --- Camera Logic with Dynamic Zoom ---
         let totalMass = 0; let playerCenterX = 0;
-        let playerCenterY = 0;
+        let playerCenterY = 0; let largestRadius = 0;
         selfCells.forEach(cell => {
             const mass = cell.radius ** 2; totalMass += mass;
             playerCenterX += cell.x * mass; playerCenterY += cell.y * mass;
+            largestRadius = Math.max(largestRadius, cell.radius);
         });
         if (totalMass > 0) {
             playerCenterX /= totalMass;
             playerCenterY /= totalMass;
         }
+
+        // Calculate zoom to keep largest cell visually consistent
+        const targetZoom = baseRadius / largestRadius;
+        const minZoom = 0.1; // Minimum zoom (maximum zoom out)
+        const maxZoom = 2.0;  // Maximum zoom (can zoom in if player gets smaller)
+        const clampedZoom = Math.max(minZoom, Math.min(maxZoom, targetZoom));
+
+        // Smooth zoom transition
+        const zoomSpeed = 0.05;
+        camera.zoom += (clampedZoom - camera.zoom) * zoomSpeed;
 
         const dx = playerCenterX - camera.x;
         const dy = playerCenterY - camera.y;
@@ -481,7 +636,10 @@ function gameLoop() {
 
     // --- World and Object Rendering (ALWAYS RUNS) ---
     ctx.save();
-    ctx.translate(canvas.width / 2 - camera.x, canvas.height / 2 - camera.y);
+    // Apply zoom and translation
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.scale(camera.zoom, camera.zoom);
+    ctx.translate(-camera.x, -camera.y);
 
     drawGrid();
     ctx.strokeStyle = '#E0E0E0'; ctx.lineWidth = 15;
@@ -510,17 +668,26 @@ function gameLoop() {
     if (selfCells && selfCells.length > 0) {
         drawMinimap(selfCells);
     }
-    ctx.font = '20px Arial'; ctx.fillStyle = 'white'; ctx.textAlign = 'right';
+
+    // Display coordinates directly above the minimap
+    const currentMinimapSize = getCurrentMinimapSize();
+    ctx.font = '20px Arial';
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'center';
     const coordsText = `X: ${Math.round(camera.x)}, Y: ${Math.round(camera.y)}`;
-    ctx.fillText(coordsText, canvas.width - getCurrentMinimapSize() - MINIMAP_MARGIN, canvas.height - getCurrentMinimapSize() - MINIMAP_MARGIN - 10);
+    const minimapCenterX = canvas.width - currentMinimapSize - MINIMAP_MARGIN + (currentMinimapSize / 2);
+    const minimapTopY = canvas.height - currentMinimapSize - MINIMAP_MARGIN;
+    ctx.fillText(coordsText, minimapCenterX, minimapTopY - 10);
 
     // Render touch controls only if it's a mobile device
     if (isMobileDevice()) {
         drawTouchControls();
     }
 
-    // --- Debug UI ---
-    drawDebugUI();
+    // --- Debug UI (only render if debug mode is enabled) ---
+    if (debugMode) {
+        drawDebugUI();
+    }
 
     requestAnimationFrame(gameLoop);
 }
@@ -533,13 +700,13 @@ function drawDebugUI() {
     if (!selfCells || selfCells.length === 0) return;
 
     const debugX = 20;
-    const debugY = canvas.height - 250; // Increased height for more info
+    const debugY = canvas.height - 280; // Increased height for zoom info
     const lineHeight = 20;
     const now = Date.now();
 
     // Semi-transparent background
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    const debugHeight = (selfCells.length + 2) * lineHeight + 10; // Extra line for sync info
+    const debugHeight = (selfCells.length + 3) * lineHeight + 10; // Extra lines for zoom info
     ctx.fillRect(debugX - 5, debugY - 5, 350, debugHeight);
 
     // Title
@@ -581,6 +748,12 @@ function drawDebugUI() {
 
     ctx.fillStyle = avgSyncDistance > 5 ? '#ffaa00' : '#66ff66';
     ctx.fillText(`Avg Sync Distance: ${avgSyncDistance.toFixed(1)}px`, debugX, debugY + (selfCells.length + 2) * lineHeight);
+
+    // Zoom information
+    const largestRadius = Math.max(...selfCells.map(cell => cell.radius));
+    ctx.fillStyle = '#00aaff';
+    ctx.fillText(`Zoom: ${camera.zoom.toFixed(2)}x | Largest: ${largestRadius.toFixed(1)}px | Base: ${baseRadius.toFixed(1)}px`,
+        debugX, debugY + (selfCells.length + 3) * lineHeight);
 }
 
 // --- Initial Setup & Helper Functions ---
@@ -794,6 +967,63 @@ function drawTouchControls() {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('EJECT', ejectButton.x, ejectButton.y);
+}
+
+// --- Chat Functions ---
+function toggleChat() {
+    const chatConsole = document.getElementById('chat-console');
+    const chatToggleBtn = document.getElementById('chat-toggle');
+
+    if (chatConsole && chatToggleBtn) {
+        chatConsole.classList.toggle('collapsed');
+        chatToggleBtn.textContent = chatConsole.classList.contains('collapsed') ? '+' : '−';
+        console.log('Chat toggled. Collapsed:', chatConsole.classList.contains('collapsed'));
+    }
+}
+
+// Make toggleChat available globally
+window.toggleChat = toggleChat;
+
+function addChatMessage(nickname, message, isOwn = false) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = `chat-message ${isOwn ? 'own' : ''}`;
+
+    const nicknameSpan = document.createElement('span');
+    nicknameSpan.className = 'chat-nickname';
+    nicknameSpan.textContent = nickname + ': ';
+
+    const messageSpan = document.createElement('span');
+    messageSpan.className = 'chat-text';
+    messageSpan.textContent = message;
+
+    messageDiv.appendChild(nicknameSpan);
+    messageDiv.appendChild(messageSpan);
+
+    chatMessages.appendChild(messageDiv);
+
+    // Auto-scroll to bottom
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Remove old messages if too many (keep last 50)
+    while (chatMessages.children.length > 50) {
+        chatMessages.removeChild(chatMessages.firstChild);
+    }
+}
+
+function addSystemMessage(message) {
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'chat-message system';
+    messageDiv.textContent = message;
+
+    chatMessages.appendChild(messageDiv);
+
+    // Auto-scroll to bottom
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    // Remove old messages if too many
+    while (chatMessages.children.length > 50) {
+        chatMessages.removeChild(chatMessages.firstChild);
+    }
 }
 
 // --- Mobile Device Detection ---
