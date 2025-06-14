@@ -302,6 +302,11 @@ io.on('connection', (socket) => {
             }
         });
     });
+
+    // Handle ping requests for latency measurement
+    socket.on('ping', () => {
+        socket.emit('pong');
+    });
 });
 
 // Game Logic Loop (runs at 60Hz)

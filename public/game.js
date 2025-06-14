@@ -23,6 +23,9 @@ const CAMERA_DEAD_ZONE_RADIUS = 100; // Camera dead zone radius
 let camera = { x: 0, y: 0, zoom: 1.0 }; // Camera position and zoom
 let mousePos = { x: 0, y: 0 }; // Mouse position
 
+let currentPing = 0; // Current ping in milliseconds
+let lastPingTime = 0; // Last time ping was measured
+
 // --- DOM Elements ---
 const startScreen = document.getElementById('start-screen'); // Start screen element
 const nicknameInput = document.getElementById('nickname-input'); // Nickname input field
@@ -341,6 +344,11 @@ function initializeGame(nickname, color, imageDataUrl) {
         selfId = socket.id;
         console.log('Sending joinGame event...');
 
+        // Start ping measurement
+        measurePing();
+        // Measure ping every 2 seconds
+        setInterval(measurePing, 2000);
+
         try {
             socket.emit('joinGame', { nickname, color, image: imageDataUrl });
         } catch (error) {
@@ -479,6 +487,12 @@ function initializeGame(nickname, color, imageDataUrl) {
     });
 
     socket.on('youDied', (data) => showStartScreen(data.score));
+
+    // Handle ping response
+    socket.on('pong', () => {
+        const pingTime = Date.now() - lastPingTime;
+        currentPing = pingTime;
+    });
 }
 
 window.addEventListener('mousemove', (e) => { if (!isMobileDevice()) { mousePos.x = e.clientX; mousePos.y = e.clientY; } });
@@ -931,6 +945,13 @@ function gameLoop() {
     const coordsText = `X: ${Math.round(camera.x)}, Y: ${Math.round(camera.y)}`;
     ctx.fillText(coordsText, minimapCenterX, minimapTopY - 10);
 
+    // Draw ping in bottom left corner
+    ctx.font = '8pt Arial';
+    ctx.fillStyle = currentPing > 100 ? '#ff6666' : currentPing > 50 ? '#ffaa00' : '#66ff66';
+    ctx.textAlign = 'left';
+    const pingText = `Ping: ${currentPing}ms`;
+    ctx.fillText(pingText, 10, cssHeight - 10);
+
     if (isMobileDevice()) { drawTouchControls(); }
     if (debugMode) { drawDebugUI(cssHeight); }
 
@@ -1366,5 +1387,12 @@ function forceMobileChatSize() {
 
     if (chatConsoleEl && chatConsoleEl.classList.contains('collapsed')) {
         chatConsoleEl.style.height = '26px';
+    }
+}
+// --- Ping Measurement Function ---
+function measurePing() {
+    if (socket && socket.connected) {
+        lastPingTime = Date.now();
+        socket.emit('ping');
     }
 }
