@@ -31,7 +31,7 @@ const imagePicker = document.getElementById('image-picker'); // Image picker inp
 const playButton = document.getElementById('play-button'); // Play button
 const errorMessage = document.getElementById('error-message'); // Error message element
 const finalScoreElement = document.getElementById('final-score'); // Final score display
-const chatConsole = document.getElementById('chat-console'); // Chat console
+// MODIFIED: Removed global chatConsole variable to prevent script load race conditions.
 const chatMessages = document.getElementById('chat-messages'); // Chat messages container
 const chatInput = document.getElementById('chat-input'); // Chat input field
 
@@ -199,7 +199,9 @@ playButton.addEventListener('click', () => {
 
 function showStartScreen(score) {
     startScreen.style.display = 'flex';
-    chatConsole.classList.add('hidden');
+    // MODIFIED: Get chat console element locally to avoid race conditions.
+    const chatConsoleEl = document.getElementById('chat-console');
+    if (chatConsoleEl) chatConsoleEl.classList.add('hidden');
     hideMobileKeyboard();
 
     const chatInput = document.getElementById('chat-input');
@@ -292,7 +294,9 @@ function initializeGame(nickname, color, imageDataUrl) {
         }
         console.log('Game ready!');
         gameReady = true;
-        chatConsole.classList.remove('hidden');
+        // MODIFIED: Get chat console element locally to avoid race conditions.
+        const chatConsoleEl = document.getElementById('chat-console');
+        if (chatConsoleEl) chatConsoleEl.classList.remove('hidden');
 
         if (isMobileDevice()) {
             forceMobileChatSize();
@@ -387,22 +391,17 @@ window.addEventListener('keydown', (e) => {
         } else {
             chatInput.focus();
         }
-    } else if (e.code === 'KeyC' && e.ctrlKey) { e.preventDefault(); toggleChat(); }
+    } else if (e.code === 'KeyC' && e.ctrlKey) {
+        e.preventDefault();
+        // MODIFIED: Call toggleChat with 'true' to focus the input on toggle-open.
+        toggleChat(true);
+    }
 });
 
 // --- Chat & Nickname Event Listeners ---
 document.addEventListener('DOMContentLoaded', () => {
-    const chatToggleBtn = document.getElementById('chat-toggle');
-    if (chatToggleBtn) {
-        chatToggleBtn.addEventListener('click', () => {
-            console.log('Chat toggle clicked');
-            chatConsole.classList.toggle('collapsed');
-            chatToggleBtn.textContent = chatConsole.classList.contains('collapsed') ? '+' : '−';
-            if (isMobileDevice()) {
-                chatConsole.style.height = chatConsole.classList.contains('collapsed') ? '26px' : '104px';
-            }
-        });
-    }
+    // Set up chat toggle (this will run again but that's okay)
+    setupChatToggle();
 
     if (isMobileDevice()) {
         forceMobileChatSize();
@@ -720,12 +719,16 @@ function gameLoop() {
         const allCells = Object.values(players).flat();
         allCells.forEach(cell => {
             if (cell.serverX !== undefined && cell.serverY !== undefined) {
-                const lerpSpeed = 0.3;
+                const lerpSpeed = 0.25; // Slightly slower for smoother movement
                 const distanceToServer = Math.hypot(cell.serverX - cell.x, cell.serverY - cell.y);
-                const adaptiveLerpSpeed = distanceToServer > 20 ? 0.5 : lerpSpeed;
-                cell.x += (cell.serverX - cell.x) * adaptiveLerpSpeed;
-                cell.y += (cell.serverY - cell.y) * adaptiveLerpSpeed;
-                if (distanceToServer < 0.5) { cell.x = cell.serverX; cell.y = cell.serverY; }
+
+                cell.x += (cell.serverX - cell.x) * lerpSpeed;
+                cell.y += (cell.serverY - cell.y) * lerpSpeed;
+
+                if (distanceToServer < 0.3) {
+                    cell.x = cell.serverX;
+                    cell.y = cell.serverY;
+                }
             }
         });
 
@@ -1107,19 +1110,71 @@ function drawTouchControls() {
     ctx.fillText('EJECT', ejectButton.x, ejectButton.y);
 }
 
-function toggleChat() {
-    const chatConsole = document.getElementById('chat-console');
+function toggleChat(shouldFocus = false) {
+    const chatConsoleEl = document.getElementById('chat-console');
     const chatToggleBtn = document.getElementById('chat-toggle');
-    if (chatConsole && chatToggleBtn) {
-        chatConsole.classList.toggle('collapsed');
-        chatToggleBtn.textContent = chatConsole.classList.contains('collapsed') ? '+' : '−';
-        if (isMobileDevice()) {
-            chatConsole.style.height = chatConsole.classList.contains('collapsed') ? '26px' : '104px';
-        }
-        console.log('Chat toggled. Collapsed:', chatConsole.classList.contains('collapsed'));
+    const chatInputEl = document.getElementById('chat-input');
+
+    if (!chatConsoleEl || !chatToggleBtn) {
+        console.warn('Chat elements not found:', { chatConsoleEl: !!chatConsoleEl, chatToggleBtn: !!chatToggleBtn });
+        return;
     }
+
+    const wasCollapsed = chatConsoleEl.classList.contains('collapsed');
+
+    chatConsoleEl.classList.toggle('collapsed');
+    const isNowCollapsed = chatConsoleEl.classList.contains('collapsed');
+
+    chatToggleBtn.textContent = isNowCollapsed ? '+' : '−';
+
+    if (isMobileDevice()) {
+        chatConsoleEl.style.height = isNowCollapsed ? '26px' : '104px';
+    }
+
+    // If we just opened the chat (it was collapsed, but isn't now),
+    // and we were asked to focus, and we are not on mobile, then focus the input.
+    if (wasCollapsed && !isNowCollapsed && shouldFocus && !isMobileDevice()) {
+        if (chatInputEl) {
+            chatInputEl.focus();
+        }
+    }
+
+    console.log('Chat toggled:', { wasCollapsed, isNowCollapsed });
 }
 window.toggleChat = toggleChat;
+
+function setupChatToggle() {
+    const chatToggleBtn = document.getElementById('chat-toggle');
+    if (chatToggleBtn) {
+        // Remove any existing event listeners first
+        chatToggleBtn.onclick = null;
+
+        // Add the click event listener
+        chatToggleBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log('Chat toggle clicked');
+            toggleChat(false);
+        });
+
+        console.log('Chat toggle event listener attached');
+        return true;
+    } else {
+        console.warn('Chat toggle button not found');
+        return false;
+    }
+}
+
+// Try to set up the chat toggle immediately
+setupChatToggle();
+
+// Also try when DOM is loaded (if it hasn't loaded yet)
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', setupChatToggle);
+} else {
+    // DOM is already loaded, try again in case elements were added later
+    setTimeout(setupChatToggle, 100);
+}
 
 function addChatMessage(nickname, message, isOwn = false) {
     const messageDiv = document.createElement('div');
@@ -1151,12 +1206,13 @@ function addSystemMessage(message) {
 function isMobileDevice() { return (typeof window.orientation !== "undefined") || (navigator.userAgent.indexOf('IEMobile') !== -1); }
 
 function forceMobileChatSize() {
-    const chatConsole = document.getElementById('chat-console');
-    if (chatConsole) {
-        chatConsole.style.width = '160px';
-        chatConsole.style.height = '104px';
-        chatConsole.style.top = '10px';
-        chatConsole.style.left = '10px';
+    // MODIFIED: Get chat console element locally to avoid race conditions.
+    const chatConsoleEl = document.getElementById('chat-console');
+    if (chatConsoleEl) {
+        chatConsoleEl.style.width = '160px';
+        chatConsoleEl.style.height = '104px';
+        chatConsoleEl.style.top = '10px';
+        chatConsoleEl.style.left = '10px';
     }
     const chatHeader = document.getElementById('chat-header');
     if (chatHeader) { chatHeader.style.padding = '2px 4px'; chatHeader.style.minHeight = '12px'; }
@@ -1190,7 +1246,7 @@ function forceMobileChatSize() {
     const chatMessageElements = document.querySelectorAll('.chat-message');
     chatMessageElements.forEach(msg => { msg.style.marginBottom = '2px'; });
 
-    if (chatConsole && chatConsole.classList.contains('collapsed')) {
-        chatConsole.style.height = '26px';
+    if (chatConsoleEl && chatConsoleEl.classList.contains('collapsed')) {
+        chatConsoleEl.style.height = '26px';
     }
 }
