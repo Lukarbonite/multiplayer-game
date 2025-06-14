@@ -14,6 +14,13 @@ let debugMode = false; // Debug mode toggle (default off)
 let customZoomMultiplier = 1.0; // Custom zoom multiplier for /zoom command
 let activeInputTarget = null; // MODIFIED: Tracks which input the mobile keyboard is for
 
+// Xbox 360 Controller variables
+let gamepadConnected = false;
+let gamepadIndex = -1;
+let gamepadDeadzone = 0.15; // Deadzone for analog sticks
+let gamepadButtonStates = {}; // Track button press states for edge detection
+let gamepadVibrationSupported = false;
+
 const MINIMAP_SIZE = 200; // Default minimap size
 const MINIMAP_SIZE_MOBILE = 120; // Smaller minimap size for mobile
 const MINIMAP_MARGIN = 20; // Default minimap margin
@@ -42,6 +49,306 @@ const chatInput = document.getElementById('chat-input'); // Chat input field
 const mobileKeyboard = document.getElementById('mobile-keyboard');
 const keyboardClose = document.getElementById('keyboard-close');
 const keyboardKeys = document.getElementById('keyboard-keys');
+
+// --- Xbox 360 Controller Setup ---
+function setupGamepadSupport() {
+    console.log('Setting up Xbox 360 controller support...');
+
+    // Check if gamepad API is supported
+    if (!('getGamepads' in navigator)) {
+        console.log('Gamepad API not supported in this browser');
+        return;
+    }
+
+    // Listen for gamepad connection events
+    window.addEventListener('gamepadconnected', (e) => {
+        console.log('Gamepad connected:', e.gamepad.id);
+
+        // Check if it's an Xbox controller (various ID patterns)
+        const gamepadId = e.gamepad.id.toLowerCase();
+        if (gamepadId.includes('xbox') || gamepadId.includes('xinput') || gamepadId.includes('360')) {
+            gamepadConnected = true;
+            gamepadIndex = e.gamepad.index;
+            gamepadVibrationSupported = e.gamepad.vibrationActuator !== undefined;
+
+            // Initialize button states
+            gamepadButtonStates = {};
+            for (let i = 0; i < e.gamepad.buttons.length; i++) {
+                gamepadButtonStates[i] = false;
+            }
+
+            addSystemMessage('Xbox 360 controller connected!');
+            console.log(`Xbox controller connected at index ${gamepadIndex}, vibration: ${gamepadVibrationSupported}`);
+        } else {
+            console.log('Connected gamepad is not an Xbox controller:', e.gamepad.id);
+        }
+    });
+
+    window.addEventListener('gamepaddisconnected', (e) => {
+        console.log('Gamepad disconnected:', e.gamepad.id);
+        if (e.gamepad.index === gamepadIndex) {
+            gamepadConnected = false;
+            gamepadIndex = -1;
+            gamepadButtonStates = {};
+            addSystemMessage('Xbox 360 controller disconnected');
+        }
+    });
+
+    // Start the gamepad polling loop
+    pollGamepad();
+}
+
+function pollGamepad() {
+    if (gamepadConnected && gameReady && socket && socket.connected) {
+        const gamepads = navigator.getGamepads();
+        const gamepad = gamepads[gamepadIndex];
+
+        if (gamepad) {
+            handleGamepadInput(gamepad);
+        } else {
+            // Gamepad was disconnected
+            gamepadConnected = false;
+            gamepadIndex = -1;
+        }
+    }
+
+    // Continue polling at 60fps
+    requestAnimationFrame(pollGamepad);
+}
+
+function handleGamepadInput(gamepad) {
+    const selfCells = players[selfId];
+    if (!selfCells || selfCells.length === 0) return;
+
+    // Left analog stick for movement
+    const leftStickX = gamepad.axes[0];
+    const leftStickY = gamepad.axes[1];
+
+    // Apply deadzone
+    const leftMagnitude = Math.hypot(leftStickX, leftStickY);
+    if (leftMagnitude > gamepadDeadzone) {
+        // Normalize the stick input and remove deadzone
+        const normalizedMagnitude = (leftMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
+        const normalizedX = (leftStickX / leftMagnitude) * normalizedMagnitude;
+        const normalizedY = (leftStickY / leftMagnitude) * normalizedMagnitude;
+
+        // Calculate target position based on stick input
+        const movementScale = 400 / camera.zoom; // Scale movement with zoom
+        const targetX = camera.x + normalizedX * movementScale;
+        const targetY = camera.y + normalizedY * movementScale;
+
+        // Send input to server
+        socket.emit('playerInput', { worldMouseX: targetX, worldMouseY: targetY });
+
+        // Update mousePos for other systems that might need it
+        mousePos.x = (targetX - camera.x) * camera.zoom + canvas.width / 2;
+        mousePos.y = (targetY - camera.y) * camera.zoom + canvas.height / 2;
+    }
+
+    // Right analog stick for camera control (optional - could be used for different aiming)
+    const rightStickX = gamepad.axes[2];
+    const rightStickY = gamepad.axes[3];
+    const rightMagnitude = Math.hypot(rightStickX, rightStickY);
+
+    if (rightMagnitude > gamepadDeadzone) {
+        // Use right stick for independent aiming (for split/eject direction)
+        const normalizedMagnitude = (rightMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
+        const normalizedX = (rightStickX / rightMagnitude) * normalizedMagnitude;
+        const normalizedY = (rightStickY / rightMagnitude) * normalizedMagnitude;
+
+        // Calculate aim position
+        const aimScale = 200 / camera.zoom;
+        const aimX = camera.x + normalizedX * aimScale;
+        const aimY = camera.y + normalizedY * aimScale;
+
+        // Update mousePos for aiming
+        mousePos.x = (aimX - camera.x) * camera.zoom + canvas.width / 2;
+        mousePos.y = (aimY - camera.y) * camera.zoom + canvas.height / 2;
+    }
+
+    // Button mappings (Xbox 360 standard layout)
+    const buttons = {
+        A: 0,      // Split
+        B: 1,      // Eject mass
+        X: 2,      // Reserved
+        Y: 3,      // Toggle chat
+        LB: 4,     // Zoom out
+        RB: 5,     // Zoom in
+        LT: 6,     // Reserved
+        RT: 7,     // Reserved
+        Back: 8,   // Toggle debug
+        Start: 9,  // Open chat
+        LS: 10,    // Left stick click
+        RS: 11,    // Right stick click
+        DPadUp: 12,
+        DPadDown: 13,
+        DPadLeft: 14,
+        DPadRight: 15
+    };
+
+    // Handle button presses (edge detection - only trigger on press, not hold)
+    Object.entries(buttons).forEach(([buttonName, buttonIndex]) => {
+        if (gamepad.buttons[buttonIndex]) {
+            const isPressed = gamepad.buttons[buttonIndex].pressed;
+            const wasPressed = gamepadButtonStates[buttonIndex] || false;
+
+            // Button was just pressed (edge detection)
+            if (isPressed && !wasPressed) {
+                handleGamepadButton(buttonName, buttonIndex);
+            }
+
+            // Update button state
+            gamepadButtonStates[buttonIndex] = isPressed;
+        }
+    });
+
+    // Handle triggers (analog)
+    const leftTrigger = gamepad.buttons[6] ? gamepad.buttons[6].value : 0;
+    const rightTrigger = gamepad.buttons[7] ? gamepad.buttons[7].value : 0;
+
+    // Use triggers for gradual zoom control
+    if (leftTrigger > 0.1) {
+        // Left trigger - zoom out
+        customZoomMultiplier = Math.max(0.1, customZoomMultiplier - leftTrigger * 0.02);
+    }
+    if (rightTrigger > 0.1) {
+        // Right trigger - zoom in
+        customZoomMultiplier = Math.min(5.0, customZoomMultiplier + rightTrigger * 0.02);
+    }
+}
+
+function handleGamepadButton(buttonName, buttonIndex) {
+    console.log(`Xbox button pressed: ${buttonName} (${buttonIndex})`);
+
+    const selfCells = players[selfId];
+    if (!selfCells || selfCells.length === 0) return;
+
+    // Calculate direction for split/eject based on current mouse position
+    let totalMass = 0;
+    let playerCenterX = 0;
+    let playerCenterY = 0;
+
+    selfCells.forEach(cell => {
+        const mass = cell.radius ** 2;
+        totalMass += mass;
+        playerCenterX += cell.x * mass;
+        playerCenterY += cell.y * mass;
+    });
+
+    if (totalMass > 0) {
+        playerCenterX /= totalMass;
+        playerCenterY /= totalMass;
+    }
+
+    const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+    const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
+
+    let dx = worldMouseX - playerCenterX;
+    let dy = worldMouseY - playerCenterY;
+    const len = Math.hypot(dx, dy);
+
+    if (len > 0) {
+        dx /= len;
+        dy /= len;
+    } else {
+        dx = 0;
+        dy = -1;
+    }
+
+    const direction = { x: dx, y: dy };
+
+    switch (buttonName) {
+        case 'A':
+            // Split
+            socket.emit('split', { direction });
+            triggerControllerVibration(200, 0.3, 0.3); // Light vibration feedback
+            break;
+
+        case 'B':
+            // Eject mass
+            socket.emit('ejectMass', { direction });
+            triggerControllerVibration(150, 0.2, 0.2); // Very light vibration feedback
+            break;
+
+        case 'Y':
+            // Toggle chat
+            toggleChat(false);
+            break;
+
+        case 'Start':
+            // Open chat for typing
+            if (isMobileDevice()) {
+                activeInputTarget = chatInput;
+                showMobileKeyboard();
+            } else {
+                toggleChat(true); // Open and focus
+            }
+            break;
+
+        case 'Back':
+            // Toggle debug mode
+            debugMode = !debugMode;
+            addSystemMessage(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+            break;
+
+        case 'LB':
+            // Zoom out (discrete step)
+            customZoomMultiplier = Math.max(0.1, customZoomMultiplier - 0.2);
+            addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
+            break;
+
+        case 'RB':
+            // Zoom in (discrete step)
+            customZoomMultiplier = Math.min(5.0, customZoomMultiplier + 0.2);
+            addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
+            break;
+
+        case 'DPadUp':
+            // Increase gamepad sensitivity
+            gamepadDeadzone = Math.max(0.05, gamepadDeadzone - 0.05);
+            addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
+            break;
+
+        case 'DPadDown':
+            // Decrease gamepad sensitivity
+            gamepadDeadzone = Math.min(0.5, gamepadDeadzone + 0.05);
+            addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
+            break;
+
+        case 'DPadLeft':
+            // Quick mass set to 100
+            if (socket && socket.connected) {
+                socket.emit('setMass', { mass: 100 });
+            }
+            break;
+
+        case 'DPadRight':
+            // Quick mass set to 1000
+            if (socket && socket.connected) {
+                socket.emit('setMass', { mass: 1000 });
+            }
+            break;
+    }
+}
+
+function triggerControllerVibration(duration = 200, weakMagnitude = 0.3, strongMagnitude = 0.3) {
+    if (!gamepadVibrationSupported || !gamepadConnected) return;
+
+    const gamepads = navigator.getGamepads();
+    const gamepad = gamepads[gamepadIndex];
+
+    if (gamepad && gamepad.vibrationActuator) {
+        gamepad.vibrationActuator.playEffect('dual-rumble', {
+            startDelay: 0,
+            duration: duration,
+            weakMagnitude: weakMagnitude,
+            strongMagnitude: strongMagnitude
+        }).catch(err => {
+            console.log('Vibration not supported or failed:', err);
+            gamepadVibrationSupported = false;
+        });
+    }
+}
 
 // --- Mobile Keyboard Setup ---
 function setupMobileKeyboard() {
@@ -496,7 +803,12 @@ function initializeGame(nickname, color, imageDataUrl) {
     });
 }
 
-window.addEventListener('mousemove', (e) => { if (!isMobileDevice()) { mousePos.x = e.clientX; mousePos.y = e.clientY; } });
+window.addEventListener('mousemove', (e) => {
+    if (!isMobileDevice() && !gamepadConnected) {
+        mousePos.x = e.clientX;
+        mousePos.y = e.clientY;
+    }
+});
 
 window.addEventListener('keydown', (e) => {
     if (!socket || !socket.connected || !gameReady) return;
@@ -538,6 +850,9 @@ window.addEventListener('keydown', (e) => {
 document.addEventListener('DOMContentLoaded', () => {
     // Set up chat toggle (this will run again but that's okay)
     setupChatToggle();
+
+    // Initialize gamepad support
+    setupGamepadSupport();
 
     if (isMobileDevice()) {
         forceMobileChatSize();
@@ -610,19 +925,32 @@ function handleChatCommand(command) {
             addSystemMessage(`Zoom multiplier set to ${zoomValue}x`);
             return true;
 
+        case '/controller':
+            if (gamepadConnected) {
+                addSystemMessage('Xbox 360 controller is connected');
+                addSystemMessage('Controls: Left stick = Move, A = Split, B = Eject');
+                addSystemMessage('Y = Toggle chat, Start = Open chat, Back = Debug');
+                addSystemMessage('LB/RB = Zoom, Triggers = Gradual zoom, D-pad = Quick actions');
+            } else {
+                addSystemMessage('No Xbox 360 controller detected');
+                addSystemMessage('Connect your controller and it will be detected automatically');
+            }
+            return true;
+
         case '/help':
             addSystemMessage('Available commands:');
             addSystemMessage('/debug - Toggle debug information display');
-            addSystemMessage('/mass <number> - Set your mass (1-10000)');
+            addSystemMessage('/mass <number> - Set your mass (1-1000000)');
             addSystemMessage('/zoom <number> - Set zoom multiplier (0.1-10)');
+            addSystemMessage('/controller - Show controller status and controls');
             addSystemMessage('/help - Show this help message');
             addSystemMessage('');
             addSystemMessage('Game controls:');
-            addSystemMessage('Mouse - Move your cell');
-            addSystemMessage('Space - Split cells');
-            addSystemMessage('W - Eject mass');
-            addSystemMessage('Enter - Open chat');
-            addSystemMessage('Ctrl+C - Toggle chat visibility');
+            addSystemMessage('Mouse/Left stick - Move your cell');
+            addSystemMessage('Space/A button - Split cells');
+            addSystemMessage('W/B button - Eject mass');
+            addSystemMessage('Enter/Start - Open chat');
+            addSystemMessage('Ctrl+C/Y button - Toggle chat visibility');
             return true;
 
         default:
@@ -792,7 +1120,7 @@ function gameLoop() {
         let targetY = mousePos.y;
         let shouldSendInput = true; // Flag to control when to send input to server
 
-        if (isMobileDevice() && joystick.active) {
+        if (isMobileDevice() && joystick.active && !gamepadConnected) {
             const stickOffsetX = joystick.currentX - joystick.startX;
             const stickOffsetY = joystick.currentY - joystick.startY;
             const stickDistance = Math.hypot(stickOffsetX, stickOffsetY);
@@ -812,23 +1140,24 @@ function gameLoop() {
                 shouldSendInput = false;
             }
 
-        } else if (!isMobileDevice()) {
-            // For desktop, mousePos is already relative to the canvas viewport, convert to world coordinates
+        } else if (!isMobileDevice() && !gamepadConnected) {
+            // For desktop without gamepad, mousePos is already relative to the canvas viewport, convert to world coordinates
             // Account for zoom when converting mouse coordinates
             targetX = (mousePos.x - cssWidth / 2) / camera.zoom + camera.x;
             targetY = (mousePos.y - cssHeight / 2) / camera.zoom + camera.y;
-        } else {
-            // Mobile device but joystick is not active - don't send any input
+        } else if (!gamepadConnected) {
+            // Mobile device but joystick is not active and no gamepad - don't send any input
             shouldSendInput = false;
         }
+        // Note: If gamepad is connected, input is handled in handleGamepadInput()
 
-        // Only send player input when we actually want the player to move
-        if (shouldSendInput) {
+        // Only send player input when we actually want the player to move (and gamepad isn't handling it)
+        if (shouldSendInput && !gamepadConnected) {
             socket.emit('playerInput', { worldMouseX: targetX, worldMouseY: targetY });
         }
 
         // Very light client-side prediction for immediate responsiveness
-        if (shouldSendInput) {
+        if (shouldSendInput && !gamepadConnected) {
             const speed = 1; // Very reduced prediction speed
             selfCells.forEach(currentCell => {
                 const dirX = targetX - currentCell.x;
@@ -946,14 +1275,20 @@ function gameLoop() {
     const coordsText = `X: ${Math.round(camera.x)}, Y: ${Math.round(camera.y)}`;
     ctx.fillText(coordsText, minimapCenterX, minimapTopY - 10);
 
-    // Draw ping in bottom left corner
+    // Draw ping and controller status in bottom left corner
     ctx.font = '8pt Arial';
     ctx.fillStyle = currentPing > 100 ? '#ff6666' : currentPing > 50 ? '#ffaa00' : '#66ff66';
     ctx.textAlign = 'left';
     const pingText = `Ping: ${currentPing}ms`;
-    ctx.fillText(pingText, 10, cssHeight - 10);
+    ctx.fillText(pingText, 10, cssHeight - 30);
 
-    if (isMobileDevice()) { drawTouchControls(); }
+    // Show controller status
+    if (gamepadConnected) {
+        ctx.fillStyle = '#66ff66';
+        ctx.fillText('Xbox Controller: Connected', 10, cssHeight - 10);
+    }
+
+    if (isMobileDevice() && !gamepadConnected) { drawTouchControls(); }
     if (debugMode) { drawDebugUI(cssHeight); }
 
     requestAnimationFrame(gameLoop);
@@ -965,12 +1300,12 @@ function drawDebugUI(cssHeight) {
 
     const selfCells = players[selfId];
     const debugX = 20;
-    const debugY = cssHeight - 320;
+    const debugY = cssHeight - 400; // Increased height for controller info
     const lineHeight = 20;
     const now = Date.now();
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    const debugHeight = (selfCells.length + 4) * lineHeight + 10;
+    const debugHeight = (selfCells.length + 7) * lineHeight + 10; // More lines for controller info
     ctx.fillRect(debugX - 5, debugY - 5, 350, debugHeight);
 
     ctx.font = 'bold 16px Arial';
@@ -999,6 +1334,15 @@ function drawDebugUI(cssHeight) {
 
     ctx.fillStyle = '#ffaa00';
     ctx.fillText(`Zoom Multiplier: ${customZoomMultiplier.toFixed(2)}x`, debugX, debugY + (selfCells.length + 4) * lineHeight);
+
+    // Controller debug info
+    ctx.fillStyle = gamepadConnected ? '#66ff66' : '#ff6666';
+    ctx.fillText(`Controller: ${gamepadConnected ? 'Connected' : 'Disconnected'}`, debugX, debugY + (selfCells.length + 5) * lineHeight);
+
+    if (gamepadConnected) {
+        ctx.fillStyle = '#00aaff';
+        ctx.fillText(`Deadzone: ${gamepadDeadzone.toFixed(2)} | Vibration: ${gamepadVibrationSupported ? 'Yes' : 'No'}`, debugX, debugY + (selfCells.length + 6) * lineHeight);
+    }
 }
 
 // --- Initial Setup & Helper Functions ---
@@ -1044,6 +1388,9 @@ if (isMobileDevice()) {
         chatInput.style.caretColor = 'auto';
     }
 }
+
+// Initialize gamepad support
+setupGamepadSupport();
 
 requestAnimationFrame(gameLoop);
 
