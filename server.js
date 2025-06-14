@@ -661,7 +661,7 @@ setInterval(() => {
     }
 }, 1000 / 60);
 
-// Network Broadcast Loop (runs at 30Hz)
+// Network Broadcast Loop (runs at 30Hz) - MODIFIED TO FIX IMAGE SYNC
 setInterval(() => {
     if (Object.keys(players).length === 0) return;
 
@@ -678,20 +678,25 @@ setInterval(() => {
         currentCellIds.add(cell.cellId);
         const oldCellState = lastBroadcastState[cell.cellId];
 
-        const broadcastCell = { ...cell };
-        delete broadcastCell.image;
-        delete broadcastCell.launch_vx;
-        delete broadcastCell.launch_vy;
-        // Keep mergeCooldown for debug purposes on client
-        // delete broadcastCell.mergeCooldown;
-
         if (!oldCellState) {
-            updatePackage.newCells.push(broadcastCell);
+            // NEW CELL: Include image data for new cells so other players can see it
+            const newCell = { ...cell };
+            // Remove movement data but KEEP image data for new cells
+            delete newCell.launch_vx;
+            delete newCell.launch_vy;
+            updatePackage.newCells.push(newCell);
         } else {
+            // EXISTING CELL: Only send if position/size changed, and exclude image data
             if (Math.abs(cell.x - oldCellState.x) > 0.1 ||
                 Math.abs(cell.y - oldCellState.y) > 0.1 ||
                 Math.abs(cell.radius - oldCellState.radius) > 0.1) {
-                updatePackage.updatedCells.push(broadcastCell);
+
+                const updatedCell = { ...cell };
+                // Remove image data from updates since it doesn't change
+                delete updatedCell.image;
+                delete updatedCell.launch_vx;
+                delete updatedCell.launch_vy;
+                updatePackage.updatedCells.push(updatedCell);
             }
         }
     }

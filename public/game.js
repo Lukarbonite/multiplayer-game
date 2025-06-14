@@ -178,11 +178,7 @@ playButton.addEventListener('click', () => {
 
     const imageFile = imagePicker.files[0];
     if (imageFile) {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-            startScreen.style.display = 'none';
-            initializeGame(nickname, colorPicker.value, e.target.result);
-        };
+        // Check file size limit
         if (imageFile.size > 2 * 1024 * 1024) { // 2MB limit
             errorMessage.textContent = 'Image is too large (max 2MB).';
             errorMessage.classList.remove('hidden');
@@ -190,12 +186,85 @@ playButton.addEventListener('click', () => {
             playButton.textContent = 'Play';
             return;
         }
-        reader.readAsDataURL(imageFile);
+
+        // Process image with compression for mobile devices
+        processImageFile(imageFile)
+            .then(processedImageData => {
+                startScreen.style.display = 'none';
+                initializeGame(nickname, colorPicker.value, processedImageData);
+            })
+            .catch(error => {
+                console.error('Image processing error:', error);
+                errorMessage.textContent = 'Failed to process image. Try a smaller image or play without one.';
+                errorMessage.classList.remove('hidden');
+                playButton.disabled = false;
+                playButton.textContent = 'Play';
+            });
     } else {
         startScreen.style.display = 'none';
         initializeGame(nickname, colorPicker.value, null);
     }
 });
+
+// Add this new function to handle image processing
+function processImageFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onload = (e) => {
+            const img = new Image();
+
+            img.onload = () => {
+                try {
+                    // Create canvas for image processing
+                    const canvas = document.createElement('canvas');
+                    const ctx = canvas.getContext('2d');
+
+                    // Determine output size - compress larger images
+                    let { width, height } = img;
+                    const maxSize = isMobileDevice() ? 200 : 400; // Smaller max size for mobile
+
+                    if (width > maxSize || height > maxSize) {
+                        const ratio = Math.min(maxSize / width, maxSize / height);
+                        width = Math.floor(width * ratio);
+                        height = Math.floor(height * ratio);
+                    }
+
+                    canvas.width = width;
+                    canvas.height = height;
+
+                    // Draw and compress the image
+                    ctx.drawImage(img, 0, 0, width, height);
+
+                    // Convert to data URL with compression
+                    const quality = isMobileDevice() ? 0.7 : 0.8; // Lower quality for mobile
+                    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+
+                    // Check final data URL size (base64 encoded)
+                    const sizeInBytes = dataUrl.length * 0.75; // Rough estimate of base64 size
+                    const maxDataUrlSize = isMobileDevice() ? 500 * 1024 : 1024 * 1024; // 500KB mobile, 1MB desktop
+
+                    if (sizeInBytes > maxDataUrlSize) {
+                        reject(new Error('Processed image is still too large'));
+                        return;
+                    }
+
+                    console.log(`Image processed: ${width}x${height}, ${Math.round(sizeInBytes / 1024)}KB`);
+                    resolve(dataUrl);
+
+                } catch (error) {
+                    reject(error);
+                }
+            };
+
+            img.onerror = () => reject(new Error('Failed to load image'));
+            img.src = e.target.result;
+        };
+
+        reader.onerror = () => reject(new Error('Failed to read file'));
+        reader.readAsDataURL(file);
+    });
+}
 
 function showStartScreen(score) {
     startScreen.style.display = 'flex';
@@ -242,32 +311,73 @@ function processAndLoadImages(playerData) {
     });
 }
 
+// Update the initializeGame function to add better error handling
 function initializeGame(nickname, color, imageDataUrl) {
     console.log('Initializing game connection...');
     const connectionTimeout = setTimeout(() => {
         console.error('Connection timeout - resetting...');
         showStartScreen();
+        errorMessage.textContent = 'Connection failed. Please try again.';
+        errorMessage.classList.remove('hidden');
     }, 10000);
 
-    socket = io();
+    try {
+        socket = io({
+            // Add timeout and size limits for mobile
+            timeout: 5000,
+            maxHttpBufferSize: isMobileDevice() ? 1e6 : 1e7 // 1MB for mobile, 10MB for desktop
+        });
+    } catch (error) {
+        console.error('Socket creation error:', error);
+        clearTimeout(connectionTimeout);
+        showStartScreen();
+        errorMessage.textContent = 'Failed to connect. Please try again.';
+        errorMessage.classList.remove('hidden');
+        return;
+    }
 
     socket.on('connect', () => {
         console.log('Socket connected successfully:', socket.id);
         selfId = socket.id;
         console.log('Sending joinGame event...');
-        socket.emit('joinGame', { nickname, color, image: imageDataUrl });
+
+        try {
+            socket.emit('joinGame', { nickname, color, image: imageDataUrl });
+        } catch (error) {
+            console.error('Error sending joinGame:', error);
+            clearTimeout(connectionTimeout);
+            showStartScreen();
+            errorMessage.textContent = 'Failed to join game. Image might be too large.';
+            errorMessage.classList.remove('hidden');
+        }
     });
 
     socket.on('connect_error', (error) => {
         console.error('Connection error:', error);
         clearTimeout(connectionTimeout);
         showStartScreen();
+        errorMessage.textContent = 'Connection failed. Please try again.';
+        errorMessage.classList.remove('hidden');
+    });
+
+    socket.on('joinError', (data) => {
+        console.error('Join error:', data.message);
+        clearTimeout(connectionTimeout);
+        showStartScreen();
+        errorMessage.textContent = data.message;
+        errorMessage.classList.remove('hidden');
     });
 
     socket.on('disconnect', (reason) => {
         console.log('Disconnected:', reason);
         clearTimeout(connectionTimeout);
         showStartScreen();
+        if (reason === 'io client disconnect') {
+            // User initiated disconnect, don't show error
+            return;
+        }
+        errorMessage.textContent = 'Lost connection to server.';
+        errorMessage.classList.remove('hidden');
     });
 
     socket.on('initialState', (state) => {
@@ -336,6 +446,17 @@ function initializeGame(nickname, color, imageDataUrl) {
                 newCell.serverY = newCell.y;
                 players[newCell.id].push(newCell);
             }
+        }
+
+        // Process images from new cells
+        if (updatePackage.newCells.length > 0) {
+            updatePackage.newCells.forEach(cell => {
+                if (cell.image && !imageCache[cell.id]) {
+                    const img = new Image();
+                    img.src = cell.image;
+                    imageCache[cell.id] = img;
+                }
+            });
         }
 
         for (const updatedCell of updatePackage.updatedCells) {
@@ -433,9 +554,6 @@ chatInput.addEventListener('keydown', (e) => {
         }
     } else if (e.code === 'Escape') { e.preventDefault(); chatInput.blur(); }
 });
-
-// --- Touch Controls etc. (No changes below this line, kept for context) ---
-// (The rest of the game.js file remains unchanged from the previous version)
 
 // --- Chat Commands Handler ---
 function handleChatCommand(command) {
