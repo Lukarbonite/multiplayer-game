@@ -196,7 +196,7 @@ io.on('connection', (socket) => {
         const playerCells = players[socket.id];
         if (!playerCells || !data || typeof data.mass !== 'number') return;
 
-        const newMass = Math.max(1, Math.min(10000, data.mass)); // Clamp between 1 and 10000
+        const newMass = Math.max(1, Math.min(1000000, data.mass)); // Clamp between 1 and 10000
         const player = playerCells[0]; // Get first cell for nickname
 
         console.log(`Setting mass for ${player.nickname} to ${newMass}`);

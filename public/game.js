@@ -326,7 +326,8 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     try {
         socket = io({
-            // Add timeout and size limits for mobile
+            // Force polling only - no WebSocket
+            transports: ['polling'],
             timeout: 5000,
             maxHttpBufferSize: isMobileDevice() ? 1e6 : 1e7 // 1MB for mobile, 10MB for desktop
         });
@@ -586,8 +587,8 @@ function handleChatCommand(command) {
                 addSystemMessage('Usage: /mass <number> (e.g., /mass 100)');
                 return true;
             }
-            if (massValue > 10000) {
-                addSystemMessage('Maximum mass is 10000');
+            if (massValue > 1000000) {
+                addSystemMessage('Maximum mass is 1000000');
                 return true;
             }
             // Send mass change request to server
