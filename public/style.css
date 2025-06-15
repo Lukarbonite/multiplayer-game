@@ -28,10 +28,10 @@ canvas {
     z-index: 10;
     color: white;
     font-family: Arial, sans-serif;
-    /* MODIFIED: Make scrolling natural */
-    align-items: flex-start; /* Align to top for better scrolling experience */
-    overflow-y: auto;      /* Enable vertical scrolling */
-    padding: 30px 15px;      /* Add vertical and horizontal padding */
+    /* Default to top-aligned scrolling for mobile-first */
+    align-items: flex-start;
+    overflow-y: auto;
+    padding: 30px 15px;
 }
 
 /* MODIFIED: Container for form and settings */
@@ -610,4 +610,14 @@ canvas {
     .start-form label { font-size: 12px; margin-bottom: 5px; }
     #final-score { font-size: 16px; margin-bottom: 10px; }
     .setting-item { font-size: 14px; margin-bottom: 15px; }
+}
+
+/* --- NEW: Desktop-specific adjustments for Start Screen --- */
+@media (min-width: 769px) {
+    #start-screen {
+        /* Restore vertical centering on larger screens */
+        align-items: center;
+        /* Hide scrollbar when not needed */
+        overflow-y: hidden;
+    }
 }
