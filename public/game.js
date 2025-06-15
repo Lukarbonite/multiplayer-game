@@ -223,39 +223,8 @@ function handleGamepadButton(buttonName, buttonIndex) {
     const selfCells = players[selfId];
     if (!selfCells || selfCells.length === 0) return;
 
-    // Calculate direction for split/eject based on current mouse position
-    let totalMass = 0;
-    let playerCenterX = 0;
-    let playerCenterY = 0;
-
-    selfCells.forEach(cell => {
-        const mass = cell.radius ** 2;
-        totalMass += mass;
-        playerCenterX += cell.x * mass;
-        playerCenterY += cell.y * mass;
-    });
-
-    if (totalMass > 0) {
-        playerCenterX /= totalMass;
-        playerCenterY /= totalMass;
-    }
-
     const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
     const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
-
-    let dx = worldMouseX - playerCenterX;
-    let dy = worldMouseY - playerCenterY;
-    const len = Math.hypot(dx, dy);
-
-    if (len > 0) {
-        dx /= len;
-        dy /= len;
-    } else {
-        dx = 0;
-        dy = -1;
-    }
-
-    const direction = { x: dx, y: dy };
 
     switch (buttonName) {
         case 'A':
@@ -820,17 +789,14 @@ window.addEventListener('keydown', (e) => {
     const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
     const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
 
-    let totalMass = 0; let playerCenterX = 0; let playerCenterY = 0;
-    selfCells.forEach(cell => { const mass = cell.radius ** 2; totalMass += mass; playerCenterX += cell.x * mass; playerCenterY += cell.y * mass; });
-    if (totalMass > 0) { playerCenterX /= totalMass; playerCenterY /= totalMass; }
-
-    let dx = worldMouseX - playerCenterX; let dy = worldMouseY - playerCenterY;
-    const len = Math.hypot(dx, dy);
-    if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
-    const direction = { x: dx, y: dy };
-
-    if (e.code === 'Space') { e.preventDefault(); socket.emit('split', { direction }); }
-    else if (e.code === 'KeyW') { e.preventDefault(); socket.emit('ejectMass', { direction }); }
+    if (e.code === 'Space') {
+        e.preventDefault();
+        socket.emit('split', { mouseX: worldMouseX, mouseY: worldMouseY });
+    }
+    else if (e.code === 'KeyW') {
+        e.preventDefault();
+        socket.emit('ejectMass', { mouseX: worldMouseX, mouseY: worldMouseY });
+    }
     else if (e.code === 'Enter') {
         e.preventDefault();
         if (isMobileDevice()) {
@@ -1062,37 +1028,49 @@ function setupTouchControls() {
         const selfCells = players[selfId];
         if (!selfCells || selfCells.length === 0) return;
 
-        // Direction for split/eject should be based on current player center to the touch point
-        const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
-        const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
+        let worldMouseX, worldMouseY;
 
-        let totalMass = 0;
-        let playerCenterX = 0;
-        let playerCenterY = 0;
-        selfCells.forEach(cell => {
-            const mass = cell.radius ** 2;
-            totalMass += mass;
-            playerCenterX += cell.x * mass;
-            playerCenterY += cell.y * mass;
-        });
-        if (totalMass > 0) {
-            playerCenterX /= totalMass;
-            playerCenterY /= totalMass;
-        }
+        // MODIFIED: Calculate target position based on current joystick state
+        if (joystick.active) {
+            const stickOffsetX = joystick.currentX - joystick.startX;
+            const stickOffsetY = joystick.currentY - joystick.startY;
+            const stickDistance = Math.hypot(stickOffsetX, stickOffsetY);
 
-        let dx = worldMouseX - playerCenterX;
-        let dy = worldMouseY - playerCenterY;
-        const len = Math.hypot(dx, dy);
-        if (len > 0) {
-            dx /= len;
-            dy /= len;
+            if (stickDistance > 10) { // Same dead zone as movement
+                const maxStickDistance = joystick.baseRadius;
+                const normalizedStickX = stickOffsetX / maxStickDistance;
+                const normalizedStickY = stickOffsetY / maxStickDistance;
+
+                // Use same scale as movement for consistency
+                const effectiveMovementScale = 300 / camera.zoom;
+                worldMouseX = camera.x + normalizedStickX * effectiveMovementScale;
+                worldMouseY = camera.y + normalizedStickY * effectiveMovementScale;
+            } else {
+                // Joystick not moved enough, use player center as fallback
+                let totalMass = 0;
+                let playerCenterX = 0;
+                let playerCenterY = 0;
+                selfCells.forEach(cell => {
+                    const mass = cell.radius ** 2;
+                    totalMass += mass;
+                    playerCenterX += cell.x * mass;
+                    playerCenterY += cell.y * mass;
+                });
+                if (totalMass > 0) {
+                    playerCenterX /= totalMass;
+                    playerCenterY /= totalMass;
+                }
+                // Split upward as default
+                worldMouseX = playerCenterX;
+                worldMouseY = playerCenterY - 100;
+            }
         } else {
-            dx = 0;
-            dy = -1;
+            // Joystick not active, use current mousePos (shouldn't happen on mobile but good fallback)
+            worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+            worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
         }
-        const direction = { x: dx, y: dy };
 
-        socket.emit(action, { direction });
+        socket.emit(action, { mouseX: worldMouseX, mouseY: worldMouseY });
     }
 }
 

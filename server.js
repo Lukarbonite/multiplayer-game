@@ -235,30 +235,45 @@ io.on('connection', (socket) => {
 
     socket.on('split', (data) => {
         const playerCells = players[socket.id];
-        if (!playerCells || !data || !data.direction) return;
-        const dir = data.direction;
-        const len = Math.hypot(dir.x, dir.y);
-        if (len === 0) return;
-        const dx = dir.x / len;
-        const dy = dir.y / len;
+        if (!playerCells || !data) return;
+
+        // MODIFIED: Expect mouseX and mouseY instead of direction
+        const { mouseX, mouseY } = data;
+        if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
+
         const cellsToSplit = playerCells.length;
 
         for (let i = cellsToSplit - 1; i >= 0; i--) {
             const cell = playerCells[i];
             if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
-                // MODIFIED: Split mass into integers, giving extra to the new cell
-                const score1 = Math.floor(cell.score / 2);
-                const score2 = cell.score - score1; // This ensures no mass is lost
+                // MODIFIED: Calculate direction from THIS cell to mouse position
+                let dx = mouseX - cell.x;
+                let dy = mouseY - cell.y;
+                const len = Math.hypot(dx, dy);
 
-                cell.score = score1; // Original cell gets the smaller (or equal) half
+                if (len > 0) {
+                    dx /= len;
+                    dy /= len;
+                } else {
+                    // Fallback direction if mouse is exactly on cell
+                    dx = 0;
+                    dy = -1;
+                }
+
+                // Split mass into integers, giving extra to the new cell
+                const score1 = Math.floor(cell.score / 2);
+                const score2 = cell.score - score1;
+
+                cell.score = score1;
 
                 const newRadius = getRadiusFromScore(score1);
                 cell.radius = newRadius;
                 const launchSpeed = newRadius * 15;
+
                 const newCell = {
                     ...cell,
                     cellId: cellIdCounter++,
-                    score: score2, // New cell gets the larger (or equal) half
+                    score: score2,
                     radius: getRadiusFromScore(score2),
                     x: cell.x + dx * (newRadius + 5),
                     y: cell.y + dy * (newRadius + 5),
@@ -272,18 +287,34 @@ io.on('connection', (socket) => {
         }
     });
 
+
     socket.on('ejectMass', (data) => {
         const playerCells = players[socket.id];
-        if (!playerCells || !data || !data.direction) return;
-        const dir = data.direction;
-        const len = Math.hypot(dir.x, dir.y);
-        if (len === 0) return;
-        const dx = dir.x / len;
-        const dy = dir.y / len;
+        if (!playerCells || !data) return;
+
+        // MODIFIED: Expect mouseX and mouseY instead of direction
+        const { mouseX, mouseY } = data;
+        if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
+
         playerCells.forEach(cell => {
             if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
+                // MODIFIED: Calculate direction from THIS cell to mouse position
+                let dx = mouseX - cell.x;
+                let dy = mouseY - cell.y;
+                const len = Math.hypot(dx, dy);
+
+                if (len > 0) {
+                    dx /= len;
+                    dy /= len;
+                } else {
+                    // Fallback direction if mouse is exactly on cell
+                    dx = 0;
+                    dy = -1;
+                }
+
                 cell.score -= EJECTED_MASS_SCORE;
                 cell.radius = getRadiusFromScore(cell.score);
+
                 const newDud = {
                     x: cell.x + dx * (cell.radius + 5),
                     y: cell.y + dy * (cell.radius + 5),
@@ -291,7 +322,7 @@ io.on('connection', (socket) => {
                     radius: EJECTED_MASS_RADIUS,
                     color: cell.color,
                     nickname: '',
-                    type: 'ejected', // Add type for ejected mass
+                    type: 'ejected',
                     id: DUD_PLAYER_ID,
                     ownerId: cell.id,
                     cellId: cellIdCounter++,
