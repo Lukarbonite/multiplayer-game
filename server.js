@@ -37,7 +37,9 @@ const EJECTED_MASS_RADIUS = 10;
 const VIRUS_SCORE = 100;
 const VIRUS_COLOR = '#33ff33';
 const VIRUS_CONSUME_SCORE_GAIN_SPLIT = 10;
-const EJECT_LAUNCH_SPEED = 400;
+const EJECT_LAUNCH_SPEED = 500;
+const VIRUS_EJECTIONS_TO_SPLIT = 7;
+const VIRUS_LAUNCH_SPEED = 800;
 
 const DUD_PLAYER_ID = 'duds';
 
@@ -94,6 +96,7 @@ function createVirus() {
         type: 'virus',
         id: DUD_PLAYER_ID,
         cellId: cellIdCounter++,
+        ejectionsConsumed: 0,  // Track ejections consumed by this virus
     };
 }
 
@@ -394,10 +397,31 @@ setInterval(() => {
             const c1 = allCells[i];
             const c2 = allCells[j];
 
-            if (c1.id === c2.id) continue;
+            // Skip if same ID UNLESS it's different types within DUD_PLAYER_ID (virus vs ejection)
+            if (c1.id === c2.id && !(c1.id === DUD_PLAYER_ID && c1.type !== c2.type)) continue;
             if (involvedCellIds.has(c1.cellId) || involvedCellIds.has(c2.cellId)) continue;
 
             const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
+
+            // Handle virus-ejection interactions
+            if ((c1.type === 'virus' && c2.type === 'ejected') ||
+                (c1.type === 'ejected' && c2.type === 'virus')) {
+
+                const virus = c1.type === 'virus' ? c1 : c2;
+                const ejection = c1.type === 'ejected' ? c1 : c2;
+
+                // Virus consumes ejection when virus edge reaches ejection center
+                if (distance < virus.radius) {
+                    consumptions.push({
+                        virus: virus,
+                        ejection: ejection,
+                        type: 'virusEjectionInteraction'
+                    });
+                    involvedCellIds.add(virus.cellId);
+                    involvedCellIds.add(ejection.cellId);
+                }
+                continue;
+            }
 
             // MODIFIED: Handle virus-player interactions
             if ((c1.type === 'virus' && c2.type === 'player') ||
@@ -443,7 +467,77 @@ setInterval(() => {
 
     // Phase 3.5: Consumption Resolution
     for (const consumption of consumptions) {
-        if (consumption.type === 'virusPlayerInteraction') {
+        if (consumption.type === 'virusEjectionInteraction') {
+            const { virus, ejection } = consumption;
+
+            // Increment the virus's ejection counter
+            virus.ejectionsConsumed = (virus.ejectionsConsumed || 0) + 1;
+
+            // Remove the consumed ejection
+            players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== ejection.cellId);
+
+            // Check if virus should split (after consuming 7 ejections)
+            if (virus.ejectionsConsumed >= VIRUS_EJECTIONS_TO_SPLIT) {
+                // Calculate split direction based on ejection's velocity or position
+                let dx, dy;
+
+                // First try to use ejection's velocity if it exists
+                if (ejection.launch_vx !== undefined && ejection.launch_vy !== undefined) {
+                    const velocity = Math.hypot(ejection.launch_vx, ejection.launch_vy);
+                    if (velocity > 0.1) {
+                        dx = ejection.launch_vx / velocity;
+                        dy = ejection.launch_vy / velocity;
+                    } else {
+                        // Velocity too small, use position-based direction
+                        dx = ejection.x - virus.x;
+                        dy = ejection.y - virus.y;
+                        const len = Math.hypot(dx, dy);
+                        if (len > 0) {
+                            dx /= len;
+                            dy /= len;
+                        } else {
+                            dx = 1;
+                            dy = 0;
+                        }
+                    }
+                } else {
+                    // No velocity data, use position-based direction
+                    dx = ejection.x - virus.x;
+                    dy = ejection.y - virus.y;
+                    const len = Math.hypot(dx, dy);
+                    if (len > 0) {
+                        dx /= len;
+                        dy /= len;
+                    } else {
+                        dx = 1;
+                        dy = 0;
+                    }
+                }
+
+                // Create new virus with same mass, launched in ejection direction
+                const launchSpeed = VIRUS_LAUNCH_SPEED; // Virus split speed
+                const newVirus = {
+                    x: virus.x + dx * (virus.radius + 5),
+                    y: virus.y + dy * (virus.radius + 5),
+                    score: virus.score, // Same mass as original
+                    radius: virus.radius,
+                    color: VIRUS_COLOR,
+                    nickname: '',
+                    type: 'virus',
+                    id: DUD_PLAYER_ID,
+                    cellId: cellIdCounter++,
+                    ejectionsConsumed: 0, // Reset counter
+                    launch_vx: dx * launchSpeed,
+                    launch_vy: dy * launchSpeed
+                };
+
+                // Reset original virus's counter
+                virus.ejectionsConsumed = 0;
+
+                // Add new virus to the game
+                players[DUD_PLAYER_ID].push(newVirus);
+            }
+        } else if (consumption.type === 'virusPlayerInteraction') {
             const { virus, player } = consumption;
             const playerCells = players[player.id];
             const playerCellCount = playerCells.length;
