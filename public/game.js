@@ -14,6 +14,14 @@ let debugMode = false; // Debug mode toggle (default off)
 let customZoomMultiplier = 1.0; // Custom zoom multiplier for /zoom command
 let activeInputTarget = null; // MODIFIED: Tracks which input the mobile keyboard is for
 
+// NEW: Performance Settings
+let settings = {
+    highResolution: !isMobileDevice(), // Default on for desktop, off for mobile
+    highQualityGraphics: true,
+    showNicknames: true,
+    showImages: true
+};
+
 // Xbox 360 Controller variables
 let gamepadConnected = false;
 let gamepadIndex = -1;
@@ -41,14 +49,78 @@ const imagePicker = document.getElementById('image-picker'); // Image picker inp
 const playButton = document.getElementById('play-button'); // Play button
 const errorMessage = document.getElementById('error-message'); // Error message element
 const finalScoreElement = document.getElementById('final-score'); // Final score display
-// MODIFIED: Removed global chatConsole variable to prevent script load race conditions.
 const chatMessages = document.getElementById('chat-messages'); // Chat messages container
 const chatInput = document.getElementById('chat-input'); // Chat input field
+
+// NEW: Performance Settings Elements
+const settingResolution = document.getElementById('setting-resolution');
+const settingGraphics = document.getElementById('setting-graphics');
+const settingNicknames = document.getElementById('setting-nicknames');
+const settingImages = document.getElementById('setting-images');
 
 // Mobile keyboard elements
 const mobileKeyboard = document.getElementById('mobile-keyboard');
 const keyboardClose = document.getElementById('keyboard-close');
 const keyboardKeys = document.getElementById('keyboard-keys');
+
+
+// --- NEW: Settings Management ---
+function saveSettings() {
+    try {
+        localStorage.setItem('agarGameSettings', JSON.stringify(settings));
+    } catch (e) {
+        console.error("Could not save settings to localStorage.", e);
+    }
+}
+
+function loadSettings() {
+    try {
+        const savedSettings = localStorage.getItem('agarGameSettings');
+        if (savedSettings) {
+            const parsedSettings = JSON.parse(savedSettings);
+            // Merge saved settings with defaults to avoid errors if new settings are added
+            settings = { ...settings, ...parsedSettings };
+        }
+    } catch (e) {
+        console.error("Could not load settings from localStorage.", e);
+        // Fallback to defaults
+        settings = {
+            highResolution: !isMobileDevice(),
+            highQualityGraphics: true,
+            showNicknames: true,
+            showImages: true
+        };
+    }
+    updateSettingsUI();
+}
+
+function updateSettingsUI() {
+    settingResolution.checked = settings.highResolution;
+    settingGraphics.checked = settings.highQualityGraphics;
+    settingNicknames.checked = settings.showNicknames;
+    settingImages.checked = settings.showImages;
+}
+
+function setupSettingsListeners() {
+    settingResolution.addEventListener('change', () => {
+        settings.highResolution = settingResolution.checked;
+        saveSettings();
+        resizeCanvas(); // Re-render canvas with new resolution
+    });
+    settingGraphics.addEventListener('change', () => {
+        settings.highQualityGraphics = settingGraphics.checked;
+        saveSettings();
+    });
+    settingNicknames.addEventListener('change', () => {
+        settings.showNicknames = settingNicknames.checked;
+        saveSettings();
+    });
+    settingImages.addEventListener('change', () => {
+        settings.showImages = settingImages.checked;
+        saveSettings();
+    });
+}
+// --- End of Settings Management ---
 
 // --- Xbox 360 Controller Setup ---
 function setupGamepadSupport() {
@@ -715,8 +787,12 @@ function initializeGame(nickname, color, imageDataUrl) {
 
         for (const eatenId of updatePackage.eatenCellIds) {
             for (const playerId in players) {
-                players[playerId] = players[playerId].filter(c => c.cellId !== eatenId);
-                if (players[playerId].length === 0 && playerId !== DUD_PLAYER_ID) {
+                const pCells = players[playerId];
+                const index = pCells.findIndex(c => c.cellId === eatenId);
+                if (index > -1) {
+                    pCells.splice(index, 1);
+                }
+                if (pCells.length === 0 && playerId !== DUD_PLAYER_ID) {
                     delete players[playerId];
                 }
             }
@@ -748,12 +824,9 @@ function initializeGame(nickname, color, imageDataUrl) {
             if (!players[updatedCell.id]) continue;
             const cellToUpdate = players[updatedCell.id].find(c => c.cellId === updatedCell.cellId);
             if (cellToUpdate) {
+                // The server sends minimal data, so we only update what's sent
                 cellToUpdate.serverX = updatedCell.x;
                 cellToUpdate.serverY = updatedCell.y;
-                if (cellToUpdate.serverX === undefined || cellToUpdate.serverY === undefined) {
-                    cellToUpdate.x = updatedCell.x;
-                    cellToUpdate.y = updatedCell.y;
-                }
                 cellToUpdate.radius = updatedCell.radius;
                 cellToUpdate.score = updatedCell.score;
                 if (updatedCell.mergeCooldown !== undefined) {
@@ -819,6 +892,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Initialize gamepad support
     setupGamepadSupport();
+
+    // NEW: Load performance settings and set up listeners
+    loadSettings();
+    setupSettingsListeners();
 
     if (isMobileDevice()) {
         forceMobileChatSize();
@@ -1209,24 +1286,47 @@ function gameLoop() {
     ctx.scale(camera.zoom, camera.zoom);
     ctx.translate(-camera.x, -camera.y);
 
-    drawGrid();
+    // OPTIMIZATION: Calculate camera view bounds for culling
+    const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
+    const viewWidth = (cssWidth * dpr) / camera.zoom;
+    const viewHeight = (cssHeight * dpr) / camera.zoom;
+    const viewLeft = camera.x - viewWidth / 2 - 50; // Add buffer
+    const viewRight = camera.x + viewWidth / 2 + 50;
+    const viewTop = camera.y - viewHeight / 2 - 50;
+    const viewBottom = camera.y + viewHeight / 2 + 50;
+
+    drawGrid(viewLeft, viewRight, viewTop, viewBottom);
     ctx.strokeStyle = '#E0E0E0'; ctx.lineWidth = 15;
     ctx.strokeRect(-world.width / 2, -world.height / 2, world.width, world.height);
 
     const allSortedCells = Object.values(players).flat().sort((a, b) => a.radius - b.radius);
     allSortedCells.forEach(cell => {
+        // OPTIMIZATION: View frustum culling
+        if (cell.x + cell.radius < viewLeft ||
+            cell.x - cell.radius > viewRight ||
+            cell.y + cell.radius < viewTop ||
+            cell.y - cell.radius > viewBottom) {
+            return; // Don't draw if off-screen
+        }
+
         if (cell.animationOffset === undefined) { cell.animationOffset = Math.random() * 2 * Math.PI; }
         drawSquishyCell(ctx, cell, [], world);
-        if (cell.id !== DUD_PLAYER_ID && cell.nickname) {
+
+        // OPTIMIZATION: Check setting before drawing nicknames
+        if (settings.showNicknames && cell.id !== DUD_PLAYER_ID && cell.nickname) {
             const fontSize = Math.max(10, cell.radius * 0.3);
-            ctx.fillStyle = 'white';
-            ctx.font = `bold ${fontSize}px Arial`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.strokeStyle = 'black';
-            ctx.lineWidth = 2;
-            ctx.strokeText(cell.nickname, cell.x, cell.y);
-            ctx.fillText(cell.nickname, cell.x, cell.y);
+            const onscreenRadius = cell.radius * camera.zoom;
+            // Don't draw tiny text
+            if (onscreenRadius > 10) {
+                ctx.fillStyle = 'white';
+                ctx.font = `bold ${fontSize}px Arial`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 2;
+                ctx.strokeText(cell.nickname, cell.x, cell.y);
+                ctx.fillText(cell.nickname, cell.x, cell.y);
+            }
         }
     });
     ctx.restore();
@@ -1325,17 +1425,21 @@ function drawDebugUI(cssHeight) {
 
 // --- Initial Setup & Helper Functions ---
 function resizeCanvas() {
-    const devicePixelRatio = window.devicePixelRatio || 1;
+    // OPTIMIZATION: Use setting to control resolution
+    const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
     const displayWidth = window.innerWidth;
     const displayHeight = window.innerHeight;
 
     canvas.style.width = displayWidth + 'px';
     canvas.style.height = displayHeight + 'px';
-    canvas.width = displayWidth * devicePixelRatio;
-    canvas.height = displayHeight * devicePixelRatio;
-    ctx.scale(devicePixelRatio, devicePixelRatio);
+
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
+
+    // We scale the context by DPR, so we can use CSS pixels for drawing
+    ctx.scale(dpr, dpr);
     ctx.imageSmoothingEnabled = true;
-    ctx.imageSmoothingQuality = 'high';
+    ctx.imageSmoothingQuality = settings.highQualityGraphics ? 'high' : 'low';
 
     if (isMobileDevice()) {
         const cssWidth = displayWidth;
@@ -1350,7 +1454,7 @@ function resizeCanvas() {
     }
 }
 window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
+
 
 customZoomMultiplier = isMobileDevice() ? 0.25 : 1.0;
 
@@ -1369,20 +1473,56 @@ if (isMobileDevice()) {
 
 // Initialize gamepad support
 setupGamepadSupport();
+// Initial load of settings and canvas size
+loadSettings();
+resizeCanvas();
 
 requestAnimationFrame(gameLoop);
 
-function drawGrid() {
-    const gridSize = 50; ctx.strokeStyle = '#333';
+function drawGrid(viewLeft, viewRight, viewTop, viewBottom) {
+    const gridSize = 50;
+    ctx.strokeStyle = '#333';
     ctx.lineWidth = 1;
-    const halfWidth = world.width / 2; const halfHeight = world.height / 2;
-    for (let x = -halfWidth; x <= halfWidth; x += gridSize) { ctx.beginPath(); ctx.moveTo(x, -halfWidth); ctx.lineTo(x, halfHeight); ctx.stroke(); }
-    for (let y = -halfHeight; y <= halfHeight; y += gridSize) { ctx.beginPath(); ctx.moveTo(-halfWidth, y); ctx.lineTo(halfWidth, y); ctx.stroke(); }
+
+    // OPTIMIZATION: Only draw visible grid lines
+    const startX = Math.floor(viewLeft / gridSize) * gridSize;
+    const endX = Math.ceil(viewRight / gridSize) * gridSize;
+    const startY = Math.floor(viewTop / gridSize) * gridSize;
+    const endY = Math.ceil(viewBottom / gridSize) * gridSize;
+
+    for (let x = startX; x <= endX; x += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(x, startY);
+        ctx.lineTo(x, endY);
+        ctx.stroke();
+    }
+    for (let y = startY; y <= endY; y += gridSize) {
+        ctx.beginPath();
+        ctx.moveTo(startX, y);
+        ctx.lineTo(endX, y);
+        ctx.stroke();
+    }
 }
 
 function drawSquishyCell(ctx, cell, siblings, world) {
     // Destructure 'type' to identify viruses
     const { x, y, radius, color, animationOffset, type } = cell;
+    const onscreenRadius = radius * camera.zoom;
+
+    // OPTIMIZATION: Level of Detail (LOD) - Draw simple circle for small/distant cells
+    if (!settings.highQualityGraphics && onscreenRadius < 4) {
+        const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
+        if (img && img.complete && img.naturalHeight !== 0) {
+            ctx.drawImage(img, x - radius, y - radius, radius * 2, radius * 2);
+        } else {
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, 2 * Math.PI);
+            ctx.fill();
+        }
+        return;
+    }
+
     const numPoints = 20; const points = []; const time = Date.now() / 400;
     let totalSquishX = 0; let totalSquishY = 0; const SQUISH_FORCE_WALL = 1.5;
     const halfWorldW = world.width / 2; const halfWorldH = world.height / 2;
@@ -1399,13 +1539,10 @@ function drawSquishyCell(ctx, cell, siblings, world) {
     for (let i = 0; i < numPoints; i++) {
         const angle = (i / numPoints) * 2 * Math.PI;
 
-        // MODIFIED: Custom wobble for spiky viruses
         let wobble;
         if (type === 'virus') {
-            // High-frequency, high-amplitude wobble for a spiky look
             wobble = Math.sin(angle * 12 + time + animationOffset) * 0.15;
         } else {
-            // Original wobble for players and food
             wobble = Math.sin(angle * 5 + time + animationOffset) * 0.04 + Math.sin(angle * 3 - time * 1.2 + animationOffset) * 0.03;
         }
 
@@ -1436,8 +1573,8 @@ function drawSquishyCell(ctx, cell, siblings, world) {
     ctx.closePath();
 
     // Fill the cell body with color or image
-    const lookupId = cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id;
-    const img = imageCache[lookupId];
+    // OPTIMIZATION: Check setting before trying to draw image
+    const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
     if (img && img.complete && img.naturalHeight !== 0) {
         ctx.save();
         ctx.clip(); // Use the squishy path as a clipping mask
@@ -1451,14 +1588,8 @@ function drawSquishyCell(ctx, cell, siblings, world) {
     // For player cells, draw a border indicating merge cooldown status.
     if (cell.type === 'player' && cell.mergeCooldown) {
         const onCooldown = cell.mergeCooldown > Date.now();
-
-        // Use semi-transparent colors for a less harsh look
         ctx.strokeStyle = onCooldown ? 'rgba(255, 50, 50, 0.9)' : 'rgba(50, 255, 50, 0.9)';
-
-        // Border width is proportional to radius, with a minimum and maximum
         ctx.lineWidth = Math.min(8, Math.max(1, radius * 0.05));
-
-        // Stroke the same squishy path we defined earlier
         ctx.stroke();
     }
 }
@@ -1481,15 +1612,13 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     ctx.strokeRect(mapX, mapY, currentMinimapSize, currentMinimapSize);
 
     // --- Draw camera view on minimap ---
-    const viewWidth = cssWidth / camera.zoom;
-    const viewHeight = cssHeight / camera.zoom;
-
+    const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
+    const viewWidth = (cssWidth * dpr) / camera.zoom;
+    const viewHeight = (cssHeight * dpr) / camera.zoom;
     const viewTopLeftX = camera.x - viewWidth / 2;
     const viewTopLeftY = camera.y - viewHeight / 2;
-
     const minimapViewX = mapX + ((viewTopLeftX + world.width / 2) / world.width) * currentMinimapSize;
     const minimapViewY = mapY + ((viewTopLeftY + world.height / 2) / world.height) * currentMinimapSize;
-
     const minimapViewWidth = (viewWidth / world.width) * currentMinimapSize;
     const minimapViewHeight = (viewHeight / world.height) * currentMinimapSize;
 
@@ -1502,7 +1631,8 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     playerCells.forEach(cell => {
         const playerMapX = mapX + ((cell.x + world.width / 2) / world.width) * currentMinimapSize;
         const playerMapY = mapY + ((cell.y + world.height / 2) / world.height) * currentMinimapSize;
-        const img = imageCache[cell.id];
+        // OPTIMIZATION: Check setting before drawing image on minimap
+        const img = settings.showImages ? imageCache[cell.id] : null;
         if (img && img.complete && img.naturalHeight !== 0) {
             ctx.drawImage(img, playerMapX - MINIMAP_DOT_SIZE, playerMapY - MINIMAP_DOT_SIZE, MINIMAP_DOT_SIZE * 2, MINIMAP_DOT_SIZE * 2);
         } else {

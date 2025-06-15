@@ -1,5 +1,101 @@
 // server.js
 
+// --- Quadtree Implementation for Collision Detection ---
+class Quadtree {
+    constructor(bounds, maxObjects = 10, maxLevels = 5, level = 0) {
+        this.bounds = bounds;
+        this.maxObjects = maxObjects;
+        this.maxLevels = maxLevels;
+        this.level = level;
+        this.objects = [];
+        this.nodes = [];
+    }
+
+    split() {
+        const nextLevel = this.level + 1;
+        const subWidth = this.bounds.width / 2;
+        const subHeight = this.bounds.height / 2;
+        const x = this.bounds.x;
+        const y = this.bounds.y;
+
+        // top right
+        this.nodes[0] = new Quadtree({ x: x + subWidth, y: y, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
+        // top left
+        this.nodes[1] = new Quadtree({ x: x, y: y, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
+        // bottom left
+        this.nodes[2] = new Quadtree({ x: x, y: y + subHeight, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
+        // bottom right
+        this.nodes[3] = new Quadtree({ x: x + subWidth, y: y + subHeight, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
+    }
+
+    getIndex(rect) {
+        let index = -1;
+        const verticalMidpoint = this.bounds.x + (this.bounds.width / 2);
+        const horizontalMidpoint = this.bounds.y + (this.bounds.height / 2);
+
+        const topQuadrant = (rect.y < horizontalMidpoint && rect.y + rect.height < horizontalMidpoint);
+        const bottomQuadrant = (rect.y > horizontalMidpoint);
+
+        if (rect.x < verticalMidpoint && rect.x + rect.width < verticalMidpoint) {
+            if (topQuadrant) { index = 1; }
+            else if (bottomQuadrant) { index = 2; }
+        }
+        else if (rect.x > verticalMidpoint) {
+            if (topQuadrant) { index = 0; }
+            else if (bottomQuadrant) { index = 3; }
+        }
+        return index;
+    }
+
+    insert(rect) {
+        if (this.nodes.length) {
+            const index = this.getIndex(rect);
+            if (index !== -1) {
+                this.nodes[index].insert(rect);
+                return;
+            }
+        }
+
+        this.objects.push(rect);
+
+        if (this.objects.length > this.maxObjects && this.level < this.maxLevels) {
+            if (!this.nodes.length) {
+                this.split();
+            }
+
+            let i = 0;
+            while (i < this.objects.length) {
+                const index = this.getIndex(this.objects[i]);
+                if (index !== -1) {
+                    this.nodes[index].insert(this.objects.splice(i, 1)[0]);
+                } else {
+                    i++;
+                }
+            }
+        }
+    }
+
+    retrieve(returnObjects, rect) {
+        const index = this.getIndex(rect);
+        if (index !== -1 && this.nodes.length) {
+            this.nodes[index].retrieve(returnObjects, rect);
+        }
+        returnObjects.push(...this.objects);
+        return returnObjects;
+    }
+
+    clear() {
+        this.objects = [];
+        for (let i = 0; i < this.nodes.length; i++) {
+            if (this.nodes.length) {
+                this.nodes[i].clear();
+            }
+        }
+        this.nodes = [];
+    }
+}
+
+
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -49,6 +145,9 @@ let players = {};
 let cellIdCounter = 0;
 let playerInputs = {};
 let lastBroadcastState = {};
+// OPTIMIZATION: Initialize Quadtree for the world
+const worldBounds = { x: -WORLD_WIDTH / 2, y: -WORLD_HEIGHT / 2, width: WORLD_WIDTH, height: WORLD_HEIGHT };
+const qtree = new Quadtree(worldBounds);
 
 function getRadiusFromScore(score) {
     const baseRadius = Math.sqrt(score + CELL_BASE_MASS);
@@ -387,83 +486,82 @@ setInterval(() => {
         }
     }
 
-    // Phase 3: Consumption Detection
+    // --- Phase 3: Consumption Detection (OPTIMIZED WITH QUADTREE) ---
+    qtree.clear();
     const allCells = Object.values(players).flat();
+    for (const cell of allCells) {
+        qtree.insert({
+            x: cell.x - cell.radius,
+            y: cell.y - cell.radius,
+            width: cell.radius * 2,
+            height: cell.radius * 2,
+            cell: cell // Reference to the original cell object
+        });
+    }
+
     const consumptions = [];
     const involvedCellIds = new Set();
 
-    for (let i = 0; i < allCells.length; i++) {
-        for (let j = i + 1; j < allCells.length; j++) {
-            const c1 = allCells[i];
-            const c2 = allCells[j];
+    for (const c1 of allCells) {
+        if (involvedCellIds.has(c1.cellId)) continue;
+
+        const queryBounds = {
+            x: c1.x - c1.radius,
+            y: c1.y - c1.radius,
+            width: c1.radius * 2,
+            height: c1.radius * 2,
+        };
+
+        const potentialColliders = qtree.retrieve([], queryBounds);
+
+        for (const potential of potentialColliders) {
+            const c2 = potential.cell;
+
+            if (c1.cellId === c2.cellId) continue; // Don't check against self
+            if (involvedCellIds.has(c2.cellId)) continue;
 
             // Skip if same ID UNLESS it's different types within DUD_PLAYER_ID (virus vs ejection)
             if (c1.id === c2.id && !(c1.id === DUD_PLAYER_ID && c1.type !== c2.type)) continue;
-            if (involvedCellIds.has(c1.cellId) || involvedCellIds.has(c2.cellId)) continue;
 
             const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
 
             // Handle virus-ejection interactions
-            if ((c1.type === 'virus' && c2.type === 'ejected') ||
-                (c1.type === 'ejected' && c2.type === 'virus')) {
-
+            if ((c1.type === 'virus' && c2.type === 'ejected') || (c1.type === 'ejected' && c2.type === 'virus')) {
                 const virus = c1.type === 'virus' ? c1 : c2;
                 const ejection = c1.type === 'ejected' ? c1 : c2;
-
-                // Virus consumes ejection when virus edge reaches ejection center
                 if (distance < virus.radius) {
-                    consumptions.push({
-                        virus: virus,
-                        ejection: ejection,
-                        type: 'virusEjectionInteraction'
-                    });
+                    consumptions.push({ virus, ejection, type: 'virusEjectionInteraction' });
                     involvedCellIds.add(virus.cellId);
                     involvedCellIds.add(ejection.cellId);
                 }
                 continue;
             }
 
-            // MODIFIED: Handle virus-player interactions
-            if ((c1.type === 'virus' && c2.type === 'player') ||
-                (c1.type === 'player' && c2.type === 'virus')) {
-
+            // Handle virus-player interactions
+            if ((c1.type === 'virus' && c2.type === 'player') || (c1.type === 'player' && c2.type === 'virus')) {
                 const virus = c1.type === 'virus' ? c1 : c2;
                 const player = c1.type === 'player' ? c1 : c2;
-
-                // Player must be large enough to consume the virus. For consumption to occur,
-                // the player cell's outer edge must pass the center of the virus.
                 if (player.score > virus.score * 1.1 && distance < player.radius) {
-                    consumptions.push({
-                        virus: virus,
-                        player: player,
-                        type: 'virusPlayerInteraction'
-                    });
+                    consumptions.push({ virus, player, type: 'virusPlayerInteraction' });
                     involvedCellIds.add(virus.cellId);
                     involvedCellIds.add(player.cellId);
                 }
-                continue; // Skip regular consumption logic for virus-player interactions
+                continue;
             }
 
-            // MODIFIED: Regular consumption logic for non-virus interactions
+            // Regular consumption logic
             let bigger, smaller;
-            if (c1.radius > c2.radius) {
-                bigger = c1;
-                smaller = c2;
-            } else {
-                bigger = c2;
-                smaller = c1;
-            }
+            if (c1.radius > c2.radius) { bigger = c1; smaller = c2; }
+            else { bigger = c2; smaller = c1; }
 
-            // To consume, the bigger cell's edge must pass the smaller cell's center.
-            const requiredDistance = bigger.radius;
-
-            if (distance < requiredDistance && bigger.radius > smaller.radius * 1.1) {
+            if (distance < bigger.radius && bigger.radius > smaller.radius * 1.1) {
                 consumptions.push({ bigger, smaller, type: 'regularConsumption' });
                 involvedCellIds.add(bigger.cellId);
                 involvedCellIds.add(smaller.cellId);
             }
         }
     }
+
 
     // Phase 3.5: Consumption Resolution
     for (const consumption of consumptions) {
@@ -473,8 +571,10 @@ setInterval(() => {
             // Increment the virus's ejection counter
             virus.ejectionsConsumed = (virus.ejectionsConsumed || 0) + 1;
 
-            // Remove the consumed ejection
-            players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== ejection.cellId);
+            // OPTIMIZATION: Use splice instead of filter for performance
+            const dudPlayerCells = players[DUD_PLAYER_ID];
+            const ejectionIndex = dudPlayerCells.findIndex(c => c.cellId === ejection.cellId);
+            if(ejectionIndex > -1) dudPlayerCells.splice(ejectionIndex, 1);
 
             // Check if virus should split (after consuming 7 ejections)
             if (virus.ejectionsConsumed >= VIRUS_EJECTIONS_TO_SPLIT) {
@@ -552,7 +652,9 @@ setInterval(() => {
                 }
 
                 // Remove the consumed virus
-                players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+                const dudPlayerCells = players[DUD_PLAYER_ID];
+                const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
+                if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
 
             } else {
                 // Case 2: Player has room to split.
@@ -573,7 +675,9 @@ setInterval(() => {
 
                 // If we can't even split into 2 pieces, just absorb the 10 points and don't split.
                 if (finalSplitCount <= 1) {
-                    players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+                    const dudPlayerCells = players[DUD_PLAYER_ID];
+                    const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
+                    if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
                     continue; // Skip to next consumption
                 }
 
@@ -615,7 +719,9 @@ setInterval(() => {
                 }
 
                 // Remove the consumed virus
-                players[DUD_PLAYER_ID] = players[DUD_PLAYER_ID].filter(c => c.cellId !== virus.cellId);
+                const dudPlayerCells = players[DUD_PLAYER_ID];
+                const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
+                if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
             }
 
         } else { // Regular consumption
@@ -632,7 +738,12 @@ setInterval(() => {
             // Remove the consumed cell
             const smallerOwnerId = smaller.id;
             if (players[smallerOwnerId]) {
-                players[smallerOwnerId] = players[smallerOwnerId].filter(c => c.cellId !== smaller.cellId);
+                // OPTIMIZATION: Use splice instead of filter
+                const smallerPlayerCells = players[smallerOwnerId];
+                const smallerIndex = smallerPlayerCells.findIndex(c => c.cellId === smaller.cellId);
+                if (smallerIndex > -1) {
+                    smallerPlayerCells.splice(smallerIndex, 1);
+                }
 
                 if (players[smallerOwnerId].length === 0 && smallerOwnerId !== DUD_PLAYER_ID) {
                     io.to(smallerOwnerId).emit('youDied', { score: Math.max(1, Math.round(smaller.score)) });
@@ -791,7 +902,7 @@ setInterval(() => {
     }
 }, 1000 / 60);
 
-// Network Broadcast Loop (runs at 30Hz) - MODIFIED TO FIX IMAGE SYNC
+// Network Broadcast Loop (runs at 30Hz) - MODIFIED FOR PERFORMANCE
 setInterval(() => {
     if (Object.keys(players).length === 0) return;
 
@@ -809,24 +920,31 @@ setInterval(() => {
         const oldCellState = lastBroadcastState[cell.cellId];
 
         if (!oldCellState) {
-            // NEW CELL: Include image data for new cells so other players can see it
+            // NEW CELL: Send everything, including image
             const newCell = { ...cell };
-            // Remove movement data but KEEP image data for new cells
             delete newCell.launch_vx;
             delete newCell.launch_vy;
             updatePackage.newCells.push(newCell);
         } else {
-            // EXISTING CELL: Only send if position/size changed, and exclude image data
-            if (Math.abs(cell.x - oldCellState.x) > 0.1 ||
-                Math.abs(cell.y - oldCellState.y) > 0.1 ||
-                Math.abs(cell.radius - oldCellState.radius) > 0.1) {
+            // EXISTING CELL: Only send minimal changed data
+            const dx = cell.x - oldCellState.x;
+            const dy = cell.y - oldCellState.y;
+            const dr = cell.radius - oldCellState.radius;
 
-                const updatedCell = { ...cell };
-                // Remove image data from updates since it doesn't change
-                delete updatedCell.image;
-                delete updatedCell.launch_vx;
-                delete updatedCell.launch_vy;
-                updatePackage.updatedCells.push(updatedCell);
+            if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(dr) > 0.1) {
+                // OPTIMIZATION: Send a minimal update object and round values
+                const updatedCellData = {
+                    cellId: cell.cellId,
+                    id: cell.id,
+                    x: Math.round(cell.x * 10) / 10,
+                    y: Math.round(cell.y * 10) / 10,
+                    radius: Math.round(cell.radius * 10) / 10,
+                    score: Math.round(cell.score),
+                };
+                if (cell.mergeCooldown !== oldCellState.mergeCooldown) {
+                    updatedCellData.mergeCooldown = cell.mergeCooldown;
+                }
+                updatePackage.updatedCells.push(updatedCellData);
             }
         }
     }
@@ -841,12 +959,14 @@ setInterval(() => {
         io.emit('gameStateUpdate', updatePackage);
     }
 
+    // Update the last broadcast state cache
     lastBroadcastState = {};
     allCurrentCells.forEach(cell => {
         lastBroadcastState[cell.cellId] = {
             x: cell.x,
             y: cell.y,
-            radius: cell.radius
+            radius: cell.radius,
+            mergeCooldown: cell.mergeCooldown,
         };
     });
 }, 1000 / 30);

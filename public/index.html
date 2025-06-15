@@ -9,17 +9,44 @@
 <body>
 <!-- Start Screen Overlay -->
 <div id="start-screen">
-    <div class="start-form">
-        <h1>Join the Game</h1>
-        <p id="final-score" class="hidden"></p>
-        <!-- MODIFIED: Removed readonly attribute. JS will now handle it for mobile. -->
-        <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
-        <label for="color-picker">Choose your color:</label>
-        <input type="color" id="color-picker" value="#3498db">
-        <label for="image-picker">Or upload an image (replaces color):</label>
-        <input type="file" id="image-picker" accept="image/png, image/jpeg, image/gif">
-        <button id="play-button">Play</button>
-        <p id="error-message" class="hidden"></p>
+    <!-- MODIFIED: Wrapped form and new settings in a container for layout -->
+    <div class="start-content">
+        <div class="start-form">
+            <h1>Join the Game</h1>
+            <p id="final-score" class="hidden"></p>
+            <input type="text" id="nickname-input" placeholder="Enter your nickname" maxlength="15">
+            <label for="color-picker">Choose your color:</label>
+            <input type="color" id="color-picker" value="#3498db">
+            <label for="image-picker">Or upload an image (replaces color):</label>
+            <input type="file" id="image-picker" accept="image/png, image/jpeg, image/gif">
+            <button id="play-button">Play</button>
+            <p id="error-message" class="hidden"></p>
+        </div>
+
+        <!-- NEW: Performance Settings Panel -->
+        <div id="performance-settings">
+            <h2>Settings</h2>
+            <div class="setting-item">
+                <label for="setting-resolution">High Resolution</label>
+                <input type="checkbox" id="setting-resolution">
+            </div>
+            <div class="setting-item">
+                <label for="setting-graphics">High Quality Graphics</label>
+                <input type="checkbox" id="setting-graphics">
+            </div>
+            <div class="setting-item">
+                <label for="setting-nicknames">Show Nicknames</label>
+                <input type="checkbox" id="setting-nicknames">
+            </div>
+            <div class="setting-item">
+                <label for="setting-images">Show Player Images</label>
+                <input type="checkbox" id="setting-images">
+            </div>
+            <p class="settings-info">
+                Settings are saved automatically. <br>
+                Lowering quality can improve performance on older devices.
+            </p>
+        </div>
     </div>
 </div>
 

@@ -31,12 +31,24 @@ canvas {
     font-family: Arial, sans-serif;
 }
 
+/* MODIFIED: Container for form and settings */
+.start-content {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 30px;
+    padding: 20px;
+}
+
 .start-form {
     background-color: #2c3e50;
     padding: 40px;
     border-radius: 10px;
     text-align: center;
     box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+    width: 350px;
+    flex-shrink: 0;
 }
 
 .start-form h1 {
@@ -122,6 +134,75 @@ canvas {
     margin-bottom: 15px;
     font-weight: bold;
 }
+
+/* --- NEW: Performance Settings Styles --- */
+#performance-settings {
+    background-color: #2c3e50;
+    padding: 20px 30px;
+    border-radius: 10px;
+    width: 300px;
+    flex-shrink: 0;
+}
+
+#performance-settings h2 {
+    margin-top: 0;
+    text-align: center;
+    margin-bottom: 25px;
+    font-size: 22px;
+}
+
+.setting-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    font-size: 16px;
+}
+
+.setting-item label {
+    margin-right: 15px;
+}
+
+.setting-item input[type="checkbox"] {
+    appearance: none;
+    width: 50px;
+    height: 26px;
+    background-color: #34495e;
+    border-radius: 13px;
+    position: relative;
+    cursor: pointer;
+    transition: background-color 0.2s;
+}
+
+.setting-item input[type="checkbox"]::before {
+    content: '';
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background-color: #95a5a6;
+    top: 3px;
+    left: 4px;
+    transition: all 0.2s ease-in-out;
+}
+
+.setting-item input[type="checkbox"]:checked {
+    background-color: #27ae60;
+}
+
+.setting-item input[type="checkbox"]:checked::before {
+    transform: translateX(24px);
+    background-color: white;
+}
+
+.settings-info {
+    font-size: 13px;
+    color: #bdc3c7;
+    text-align: center;
+    margin-top: 15px;
+    line-height: 1.4;
+}
+
 
 /* --- Chat Console Styles --- */
 #chat-console {
@@ -409,10 +490,19 @@ canvas {
 
 /* Mobile adjustments */
 @media (max-width: 768px) {
-    /* MODIFIED: Start screen sizing */
+    /* MODIFIED: Stack start screen items */
+    .start-content {
+        flex-direction: column;
+        align-items: center;
+    }
+    #performance-settings {
+        width: 90vw;
+        max-width: 350px;
+    }
+
     .start-form {
         width: 90vw;
-        max-width: 400px;
+        max-width: 350px;
         padding: 20px;
     }
     .start-form h1 {
