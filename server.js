@@ -211,11 +211,12 @@ const C2S_OPCODES = {
     CHAT_MESSAGE: 5,
     SET_MASS: 6,
     PING: 7,
+    ACK: 8, // Acknowledge receipt of a reliable packet
 };
 
 const S2C_OPCODES = {
     INITIAL_STATE: 0,
-    GAME_STATE_UPDATE: 1,
+    GAME_STATE_UPDATE: 1, // Note: This is now only used as an identifier for payload type
     LEADERBOARD_UPDATE: 2,
     YOU_DIED: 3,
     CHAT_MESSAGE: 4,
@@ -223,6 +224,7 @@ const S2C_OPCODES = {
     PONG: 6,
     PLAYER_DISCONNECTED: 7,
     JOIN_ERROR: 8,
+    RELIABLE_UPDATE: 9, // Wrapper for game state updates
 };
 
 const textEncoder = new TextEncoder();
@@ -233,6 +235,13 @@ const PHYSICS_UPDATE_RATE = 60; // Hz
 const NETWORK_UPDATE_RATE = 30; // Hz
 const INTEREST_RADIUS = 1500; // Only send updates for objects within this radius
 const SPATIAL_HASH_CELL_SIZE = 200; // Size of spatial hash cells
+
+// Reliable Protocol Settings
+const reliableSocketManager = {};
+const RETRANSMIT_TIMEOUT = 250; // ms to wait before re-sending a packet
+const MAX_RETRIES = 15; // Max times to re-send before disconnecting client
+const wrtc = require('@roamhq/wrtc');
+const peerConnections = {}; // socket.id -> { pc, dataChannel }
 
 app.use(express.static('public'));
 
@@ -337,9 +346,188 @@ function isInInterestArea(obj, interestArea) {
 }
 
 io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
+    console.log('User connected via TCP:', socket.id);
 
-    // Single message handler for all binary communication
+    // --- WebRTC Signaling Setup ---
+    const pc = new wrtc.RTCPeerConnection({
+        iceServers: [
+            // You would use public STUN servers in a real application
+            { urls: 'stun:stun.l.google.com:19302' }
+        ]
+    });
+    peerConnections[socket.id] = { pc: pc, dataChannel: null };
+
+    pc.onicecandidate = (event) => {
+        if (event.candidate) {
+            socket.emit('webrtc-candidate', event.candidate);
+        }
+    };
+
+    pc.ondatachannel = (event) => {
+        const dataChannel = event.channel;
+        console.log(`Data channel "${dataChannel.label}" established for ${socket.id}`);
+        peerConnections[socket.id].dataChannel = dataChannel;
+
+        dataChannel.onopen = () => {
+            console.log(`Data channel for ${socket.id} is open.`);
+        };
+
+        dataChannel.onclose = () => {
+            console.log(`Data channel for ${socket.id} closed.`);
+        };
+
+        dataChannel.onerror = (error) => {
+            console.error(`Data channel error for ${socket.id}:`, error);
+        };
+
+        // This is where we receive game data from the client over UDP
+        dataChannel.onmessage = (msg) => {
+            try {
+                const data = msg.data;
+                // The client sends an ArrayBuffer, which is what we receive here.
+                if (data instanceof ArrayBuffer && data.byteLength > 0) {
+                    const view = new DataView(data);
+                    const opcode = view.getUint8(0);
+                    let offset = 1;
+
+                    // Only handle high-frequency game inputs and ACKs here
+                    switch (opcode) {
+                        case C2S_OPCODES.PLAYER_INPUT_MOUSE: {
+                            if (!players[socket.id]) break;
+                            playerInputs[socket.id] = {
+                                worldMouseX: view.getFloat32(offset, true),
+                                worldMouseY: view.getFloat32(offset + 4, true),
+                                inputType: 'mouse'
+                            };
+                            break;
+                        }
+
+                        case C2S_OPCODES.PLAYER_INPUT_CONTROLLER: {
+                            if (!players[socket.id]) break;
+                            playerInputs[socket.id] = {
+                                dx: view.getFloat32(offset, true),
+                                dy: view.getFloat32(offset + 4, true),
+                                magnitude: view.getFloat32(offset + 8, true),
+                                inputType: 'controller'
+                            };
+                            break;
+                        }
+
+                        case C2S_OPCODES.SPLIT: {
+                            const playerCells = players[socket.id];
+                            if (!playerCells) break;
+                            const mouseX = view.getFloat32(offset, true);
+                            const mouseY = view.getFloat32(offset + 4, true);
+
+                            const splittableCells = playerCells
+                                .filter(cell => cell.score >= PLAYER_MIN_SPLIT_SCORE)
+                                .sort((a, b) => b.score - a.score);
+
+                            for (const cell of splittableCells) {
+                                if (playerCells.length >= 16) break;
+
+                                let dx = mouseX - cell.x;
+                                let dy = mouseY - cell.y;
+                                const len = Math.hypot(dx, dy);
+                                if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
+
+                                const score1 = Math.floor(cell.score / 2);
+                                const score2 = cell.score - score1;
+                                cell.score = score1;
+                                const newRadius = getRadiusFromScore(score1);
+                                cell.radius = newRadius;
+                                const launchSpeed = newRadius * 15;
+
+                                const newCell = {
+                                    ...cell, cellId: cellIdCounter++, score: score2, radius: getRadiusFromScore(score2),
+                                    x: cell.x + dx * (newRadius + 5), y: cell.y + dy * (newRadius + 5),
+                                    mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                                    launch_vx: dx * launchSpeed, launch_vy: dy * launchSpeed
+                                };
+                                cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
+                                playerCells.push(newCell);
+                            }
+                            break;
+                        }
+
+                        case C2S_OPCODES.EJECT_MASS: {
+                            const playerCells = players[socket.id];
+                            if (!playerCells) break;
+                            const mouseX = view.getFloat32(offset, true);
+                            const mouseY = view.getFloat32(offset + 4, true);
+
+                            playerCells.forEach(cell => {
+                                if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
+                                    let dx = mouseX - cell.x;
+                                    let dy = mouseY - cell.y;
+                                    const len = Math.hypot(dx, dy);
+                                    if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
+
+                                    cell.score -= EJECTED_MASS_SCORE;
+                                    cell.radius = getRadiusFromScore(cell.score);
+
+                                    const newDud = {
+                                        x: cell.x + dx * (cell.radius + 5), y: cell.y + dy * (cell.radius + 5),
+                                        score: EJECTED_MASS_SCORE, radius: EJECTED_MASS_RADIUS, color: cell.color, nickname: '',
+                                        type: 'ejected', id: DUD_PLAYER_ID, ownerId: cell.id, cellId: cellIdCounter++,
+                                        launch_vx: dx * EJECT_LAUNCH_SPEED, launch_vy: dy * EJECT_LAUNCH_SPEED,
+                                    };
+                                    players[DUD_PLAYER_ID].push(newDud);
+                                }
+                            });
+                            break;
+                        }
+
+                        case C2S_OPCODES.ACK: {
+                            const socketState = reliableSocketManager[socket.id];
+                            if (socketState) {
+                                const ackedSeq = view.getUint32(offset, true);
+                                for (const seq of socketState.unacked.keys()) {
+                                    if (seq <= ackedSeq) {
+                                        socketState.unacked.delete(seq);
+                                    }
+                                }
+                                socketState.lastAckedByClient = Math.max(socketState.lastAckedByClient, ackedSeq);
+                            }
+                            break;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Error processing binary message from data channel:', e);
+            }
+        };
+    };
+
+    socket.on('webrtc-offer', async (offer) => {
+        try {
+            await pc.setRemoteDescription(offer);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            socket.emit('webrtc-answer', pc.localDescription);
+        } catch (error) {
+            console.error('Error handling WebRTC offer:', error);
+        }
+    });
+
+    socket.on('webrtc-candidate', (candidate) => {
+        try {
+            pc.addIceCandidate(candidate).catch(e => {}); // Ignore benign errors
+        } catch (error) {
+            console.error('Error adding ICE candidate:', error);
+        }
+    });
+    // --- End WebRTC Signaling ---
+
+
+    // Initialize state for our custom reliable protocol
+    reliableSocketManager[socket.id] = {
+        seq: 0, // Next sequence number to send
+        unacked: new Map(), // Unacknowledged packets { buffer, timestamp, retries }
+        lastAckedByClient: -1, // Last sequence number acked by the client
+    };
+
+    // This handler now only manages low-frequency/control messages over TCP
     socket.on('message', (data) => {
         try {
             if (!(data instanceof Buffer)) {
@@ -423,92 +611,6 @@ io.on('connection', (socket) => {
                     break;
                 }
 
-                case C2S_OPCODES.PLAYER_INPUT_MOUSE: {
-                    if (!players[socket.id]) break;
-                    playerInputs[socket.id] = {
-                        worldMouseX: view.getFloat32(offset, true),
-                        worldMouseY: view.getFloat32(offset + 4, true),
-                        inputType: 'mouse'
-                    };
-                    break;
-                }
-
-                case C2S_OPCODES.PLAYER_INPUT_CONTROLLER: {
-                    if (!players[socket.id]) break;
-                    playerInputs[socket.id] = {
-                        dx: view.getFloat32(offset, true),
-                        dy: view.getFloat32(offset + 4, true),
-                        magnitude: view.getFloat32(offset + 8, true),
-                        inputType: 'controller'
-                    };
-                    break;
-                }
-
-                case C2S_OPCODES.SPLIT: {
-                    const playerCells = players[socket.id];
-                    if (!playerCells) break;
-                    const mouseX = view.getFloat32(offset, true);
-                    const mouseY = view.getFloat32(offset + 4, true);
-
-                    const splittableCells = playerCells
-                        .filter(cell => cell.score >= PLAYER_MIN_SPLIT_SCORE)
-                        .sort((a, b) => b.score - a.score);
-
-                    for (const cell of splittableCells) {
-                        if (playerCells.length >= 16) break;
-
-                        let dx = mouseX - cell.x;
-                        let dy = mouseY - cell.y;
-                        const len = Math.hypot(dx, dy);
-                        if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
-
-                        const score1 = Math.floor(cell.score / 2);
-                        const score2 = cell.score - score1;
-                        cell.score = score1;
-                        const newRadius = getRadiusFromScore(score1);
-                        cell.radius = newRadius;
-                        const launchSpeed = newRadius * 15;
-
-                        const newCell = {
-                            ...cell, cellId: cellIdCounter++, score: score2, radius: getRadiusFromScore(score2),
-                            x: cell.x + dx * (newRadius + 5), y: cell.y + dy * (newRadius + 5),
-                            mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-                            launch_vx: dx * launchSpeed, launch_vy: dy * launchSpeed
-                        };
-                        cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
-                        playerCells.push(newCell);
-                    }
-                    break;
-                }
-
-                case C2S_OPCODES.EJECT_MASS: {
-                    const playerCells = players[socket.id];
-                    if (!playerCells) break;
-                    const mouseX = view.getFloat32(offset, true);
-                    const mouseY = view.getFloat32(offset + 4, true);
-
-                    playerCells.forEach(cell => {
-                        if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
-                            let dx = mouseX - cell.x;
-                            let dy = mouseY - cell.y;
-                            const len = Math.hypot(dx, dy);
-                            if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
-
-                            cell.score -= EJECTED_MASS_SCORE;
-                            cell.radius = getRadiusFromScore(cell.score);
-
-                            const newDud = {
-                                x: cell.x + dx * (cell.radius + 5), y: cell.y + dy * (cell.radius + 5),
-                                score: EJECTED_MASS_SCORE, radius: EJECTED_MASS_RADIUS, color: cell.color, nickname: '',
-                                type: 'ejected', id: DUD_PLAYER_ID, ownerId: cell.id, cellId: cellIdCounter++,
-                                launch_vx: dx * EJECT_LAUNCH_SPEED, launch_vy: dy * EJECT_LAUNCH_SPEED,
-                            };
-                            players[DUD_PLAYER_ID].push(newDud);
-                        }
-                    });
-                    break;
-                }
-
                 case C2S_OPCODES.CHAT_MESSAGE: {
                     if (players[socket.id]) {
                         const messageData = readString(view, offset);
@@ -555,12 +657,21 @@ io.on('connection', (socket) => {
                 }
             }
         } catch (e) {
-            console.error('Error processing binary message:', e);
+            console.error('Error processing binary message from TCP:', e);
         }
     });
 
     socket.on('disconnect', (reason) => {
         console.log(`Socket ${socket.id} disconnected. Reason: ${reason}`);
+
+        // Clean up WebRTC connection
+        if (peerConnections[socket.id]) {
+            peerConnections[socket.id].pc.close();
+            delete peerConnections[socket.id];
+        }
+
+        delete reliableSocketManager[socket.id];
+
         if (players[socket.id]) {
             const playerNickname = players[socket.id][0].nickname;
             console.log(`Player ${playerNickname} disconnected.`);
@@ -1118,8 +1229,10 @@ function encodeInitialState(state) {
     return buffer;
 }
 
-function encodeGameStateUpdate(updatePackage) {
-    let bufferSize = 1 + 2 + 2 + 2; // opcode, counts
+function encodeGameStateUpdatePayload(updatePackage) {
+    // This function creates the payload for a game state update, WITHOUT the opcode.
+    // The opcode is added by the reliable wrapper.
+    let bufferSize = 2 + 2 + 2; // counts
     updatePackage.updatedCells.forEach(cell => {
         bufferSize += 4 + 1; // cellId, deltaMask
         if (cell.deltaMask & 1) bufferSize += 2; // x
@@ -1142,7 +1255,8 @@ function encodeGameStateUpdate(updatePackage) {
     const view = new DataView(buffer);
     let offset = 0;
 
-    view.setUint8(offset, S2C_OPCODES.GAME_STATE_UPDATE); offset += 1;
+    // NO OPCODE HERE - This is just the payload
+    // view.setUint8(offset, S2C_OPCODES.GAME_STATE_UPDATE); offset += 1;
 
     // Updated cells (Delta-compressed)
     view.setUint16(offset, updatePackage.updatedCells.length, true); offset += 2;
@@ -1240,6 +1354,14 @@ setInterval(() => {
     for (const playerId in players) {
         if (playerId === DUD_PLAYER_ID) continue;
 
+        // Use the WebRTC data channel if available and open
+        const pcInfo = peerConnections[playerId];
+        const dataChannel = pcInfo ? pcInfo.dataChannel : null;
+
+        if (!dataChannel || dataChannel.readyState !== 'open') {
+            continue; // Skip if UDP channel isn't ready
+        }
+
         const interestArea = playerInterestAreas[playerId];
         if (!interestArea) continue;
 
@@ -1310,10 +1432,27 @@ setInterval(() => {
         }
 
         if (updatePackage.newCells.length > 0 || updatePackage.updatedCells.length > 0 || updatePackage.eatenCellIds.length > 0) {
-            io.to(playerId).emit('message', encodeGameStateUpdate(updatePackage));
+            const payload = encodeGameStateUpdatePayload(updatePackage);
+
+            const socketState = reliableSocketManager[playerId];
+            if (socketState) {
+                const seq = socketState.seq++;
+                const reliablePacket = new ArrayBuffer(1 + 4 + payload.byteLength);
+                const view = new DataView(reliablePacket);
+                view.setUint8(0, S2C_OPCODES.RELIABLE_UPDATE);
+                view.setUint32(1, seq, true);
+                new Uint8Array(reliablePacket, 5).set(new Uint8Array(payload));
+
+                socketState.unacked.set(seq, {
+                    buffer: reliablePacket,
+                    timestamp: Date.now(),
+                    retries: 0
+                });
+
+                dataChannel.send(Buffer.from(reliablePacket));
+            }
         }
 
-        // Update the last broadcasted state with quantized values for accurate delta next frame
         const newPlayerState = {};
         allCurrentCells.forEach(cell => {
             if (isInInterestArea(cell, interestArea)) {
@@ -1350,6 +1489,39 @@ setInterval(() => {
         io.send(encodeLeaderboardUpdate(topPlayers));
     }
 }, 1000); // Update every second
+
+// Retransmission loop for the reliable protocol
+setInterval(() => {
+    const now = Date.now();
+    for (const socketId in reliableSocketManager) {
+        const socketState = reliableSocketManager[socketId];
+        const pcInfo = peerConnections[socketId];
+        const dataChannel = pcInfo ? pcInfo.dataChannel : null;
+
+        if (!dataChannel) {
+            continue;
+        }
+
+        if (dataChannel.readyState !== 'open') {
+            continue;
+        }
+
+        for (const [seq, packetInfo] of socketState.unacked.entries()) {
+            if (now - packetInfo.timestamp > RETRANSMIT_TIMEOUT) {
+                if (packetInfo.retries >= MAX_RETRIES) {
+                    console.log(`Socket ${socketId} failed to ACK packet ${seq} after ${MAX_RETRIES} retries. Disconnecting.`);
+                    const socket = io.sockets.sockets.get(socketId);
+                    if (socket) socket.disconnect(true);
+                    break;
+                }
+
+                dataChannel.send(Buffer.from(packetInfo.buffer));
+                packetInfo.timestamp = now;
+                packetInfo.retries++;
+            }
+        }
+    }
+}, 100);
 
 server.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT}`);

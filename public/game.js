@@ -14,6 +14,11 @@ let debugMode = false;
 let customZoomMultiplier = 1.0;
 let activeInputTarget = null;
 let cellMap = new Map(); // For efficient cell lookup by cellId
+let dataChannel; // New global for the WebRTC data channel
+
+// Reliable protocol state
+let lastProcessedSeq = -1;
+let packetBuffer = new Map(); // For out-of-order packets
 
 // Performance monitoring
 let frameCount = 0;
@@ -38,11 +43,12 @@ const C2S_OPCODES = {
     CHAT_MESSAGE: 5,
     SET_MASS: 6,
     PING: 7,
+    ACK: 8, // Acknowledge receipt of a reliable packet
 };
 
 const S2C_OPCODES = {
     INITIAL_STATE: 0,
-    GAME_STATE_UPDATE: 1,
+    GAME_STATE_UPDATE: 1, // Note: This is now only used as an identifier for payload type
     LEADERBOARD_UPDATE: 2,
     YOU_DIED: 3,
     CHAT_MESSAGE: 4,
@@ -50,6 +56,7 @@ const S2C_OPCODES = {
     PONG: 6,
     PLAYER_DISCONNECTED: 7,
     JOIN_ERROR: 8,
+    RELIABLE_UPDATE: 9, // Wrapper for game state updates
 };
 
 const textEncoder = new TextEncoder();
@@ -654,7 +661,7 @@ function handleGamepadInput(gamepad) {
         view.setFloat32(1, directionX, true);
         view.setFloat32(5, directionY, true);
         view.setFloat32(9, finalMagnitude, true);
-        socket.send(buffer);
+        if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
     } else {
         const buffer = new ArrayBuffer(1 + 4 + 4 + 4);
         const view = new DataView(buffer);
@@ -662,7 +669,7 @@ function handleGamepadInput(gamepad) {
         view.setFloat32(1, 0, true);
         view.setFloat32(5, 0, true);
         view.setFloat32(9, 0, true);
-        socket.send(buffer);
+        if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
     }
     const rightStickX = gamepad.axes[2];
     const rightStickY = gamepad.axes[3];
@@ -707,7 +714,7 @@ function handleGamepadButton(buttonIndex) {
             view.setUint8(0, C2S_OPCODES.SPLIT);
             view.setFloat32(1, worldMouseX, true);
             view.setFloat32(5, worldMouseY, true);
-            socket.send(buffer);
+            if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
             triggerControllerVibration(200, 0.3, 0.3);
             break;
         }
@@ -717,7 +724,7 @@ function handleGamepadButton(buttonIndex) {
             view.setUint8(0, C2S_OPCODES.EJECT_MASS);
             view.setFloat32(1, worldMouseX, true);
             view.setFloat32(5, worldMouseY, true);
-            socket.send(buffer);
+            if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
             triggerControllerVibration(150, 0.2, 0.2);
             break;
         }
@@ -975,8 +982,17 @@ function showStartScreen(score) {
     gameReady = false;
     debugMode = false;
     customZoomMultiplier = isMobileDevice() ? 0.25 : 1.0;
+
+    // Reset reliable protocol state
+    lastProcessedSeq = -1;
+    packetBuffer.clear();
+
     if (socket) {
         socket.disconnect();
+    }
+    if (dataChannel) {
+        dataChannel.close();
+        dataChannel = null;
     }
 }
 
@@ -1005,6 +1021,122 @@ function processAndLoadImages(playerData) {
     });
 }
 
+function sendAck(seqNum) {
+    if (!dataChannel || dataChannel.readyState !== 'open') return;
+    const buffer = new ArrayBuffer(1 + 4);
+    const view = new DataView(buffer);
+    view.setUint8(0, C2S_OPCODES.ACK);
+    view.setUint32(1, seqNum, true);
+    dataChannel.send(buffer);
+}
+
+function handleGameStateUpdatePayload(data) {
+    const view = new DataView(data);
+    let offset = 0;
+    // Updated cells (Delta-compressed)
+    const updatedCellCount = view.getUint16(offset, true); offset += 2;
+    for (let i = 0; i < updatedCellCount; i++) {
+        const cellId = view.getUint32(offset, true); offset += 4;
+        const deltaMask = view.getUint8(offset, true); offset += 1;
+        const cellToUpdate = cellMap.get(cellId);
+
+        if (cellToUpdate) {
+            if (deltaMask & 1) { // x
+                cellToUpdate.serverX = view.getInt16(offset, true); offset += 2;
+            }
+            if (deltaMask & 2) { // y
+                cellToUpdate.serverY = view.getInt16(offset, true); offset += 2;
+            }
+            if (deltaMask & 4) { // radius
+                cellToUpdate.radius = view.getUint16(offset, true) / 10; offset += 2;
+            }
+            if (deltaMask & 8) { // score
+                cellToUpdate.score = view.getUint32(offset, true); offset += 4;
+            }
+            if (deltaMask & 16) { // mergeCooldown
+                cellToUpdate.mergeCooldown = view.getFloat64(offset, true); offset += 8;
+            }
+        } else {
+            // Cell is not known, skip its data to avoid crashing
+            // console.warn(`Received update for unknown cellId: ${cellId}`);
+            if (deltaMask & 1) offset += 2;
+            if (deltaMask & 2) offset += 2;
+            if (deltaMask & 4) offset += 2;
+            if (deltaMask & 8) offset += 4;
+            if (deltaMask & 16) offset += 8;
+        }
+    }
+    // New cells
+    const newCellCount = view.getUint16(offset, true); offset += 2;
+    for (let i = 0; i < newCellCount; i++) {
+        const idData = readString(view, offset);
+        const id = idData.value;
+        offset = idData.newOffset;
+
+        const cellData = decodeCell(view, offset);
+        const newCell = cellData.cell;
+        offset = cellData.newOffset;
+        newCell.id = id;
+
+        if (!players[newCell.id]) players[newCell.id] = [];
+        if (!cellMap.has(newCell.cellId)) {
+            newCell.serverX = newCell.x;
+            newCell.serverY = newCell.y;
+            players[newCell.id].push(newCell);
+            cellMap.set(newCell.cellId, newCell);
+            if (newCell.image && !imageCache[newCell.id]) {
+                const img = new Image();
+                img.src = newCell.image;
+                imageCache[newCell.id] = img;
+            }
+        }
+    }
+    // Eaten cells
+    const eatenCellCount = view.getUint16(offset, true); offset += 2;
+    for (let i = 0; i < eatenCellCount; i++) {
+        const eatenId = view.getUint32(offset, true); offset += 4;
+        const cellToRemove = cellMap.get(eatenId);
+        if (cellToRemove) {
+            const ownerId = cellToRemove.id;
+            if (players[ownerId]) {
+                const index = players[ownerId].findIndex(c => c.cellId === eatenId);
+                if (index > -1) {
+                    players[ownerId].splice(index, 1);
+                    if (players[ownerId].length === 0 && ownerId !== DUD_PLAYER_ID) {
+                        delete players[ownerId];
+                    }
+                }
+            }
+            cellMap.delete(eatenId);
+        }
+    }
+}
+
+function processReliableUpdate(seqNum, payload) {
+    if (seqNum <= lastProcessedSeq) {
+        // Discard old or duplicate packet
+        return;
+    }
+
+    if (seqNum > lastProcessedSeq + 1) {
+        // Packet arrived out of order, buffer it
+        packetBuffer.set(seqNum, payload);
+        return;
+    }
+
+    // This is the expected packet, process it
+    lastProcessedSeq = seqNum;
+    handleGameStateUpdatePayload(payload);
+
+    // Now, check the buffer for any subsequent packets that can be processed
+    while (packetBuffer.has(lastProcessedSeq + 1)) {
+        lastProcessedSeq++;
+        const nextPayload = packetBuffer.get(lastProcessedSeq);
+        packetBuffer.delete(lastProcessedSeq);
+        handleGameStateUpdatePayload(nextPayload);
+    }
+}
+
 function initializeGame(nickname, color, imageDataUrl) {
     const connectionTimeout = setTimeout(() => {
         showStartScreen();
@@ -1028,13 +1160,81 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     socket.on('connect', () => {
         selfId = socket.id;
-        measurePing();
-        setInterval(measurePing, 2000);
-        const joinData = { nickname, color, image: imageDataUrl };
-        if (settings.rememberScore) {
-            joinData.playerToken = getPlayerToken();
-        }
-        socket.send(encodeJoinGame(joinData));
+
+        // --- WebRTC Setup ---
+        const pc = new RTCPeerConnection({
+            iceServers: [ { urls: 'stun:stun.l.google.com:19302' } ]
+        });
+
+        dataChannel = pc.createDataChannel('game-data', {
+            ordered: false,
+            maxRetransmits: 0 // Unreliable, like UDP
+        });
+        dataChannel.binaryType = 'arraybuffer';
+
+        dataChannel.onopen = () => {
+            console.log("UDP (WebRTC) Data Channel is open.");
+            // Now that data channel is ready, send the JOIN_GAME message over TCP
+            measurePing();
+            setInterval(measurePing, 2000);
+            const joinData = { nickname, color, image: imageDataUrl };
+            if (settings.rememberScore) {
+                joinData.playerToken = getPlayerToken();
+            }
+            socket.send(encodeJoinGame(joinData));
+        };
+        dataChannel.onclose = () => console.log("UDP (WebRTC) Data Channel closed.");
+        dataChannel.onerror = (err) => console.error("Data Channel Error:", err);
+
+        dataChannel.onmessage = (event) => {
+            if (!(event.data instanceof ArrayBuffer)) {
+                console.warn("Received non-binary message on data channel, ignoring.", event.data);
+                return;
+            }
+            const view = new DataView(event.data);
+            const opcode = view.getUint8(0);
+            let offset = 1;
+
+            switch (opcode) {
+                case S2C_OPCODES.RELIABLE_UPDATE: {
+                    if (!gameReady) return;
+                    const seqNum = view.getUint32(offset, true);
+                    offset += 4;
+                    const payload = event.data.slice(offset);
+
+                    sendAck(seqNum); // Acknowledge receipt over UDP channel
+
+                    processReliableUpdate(seqNum, payload);
+                    break;
+                }
+            }
+        };
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                socket.emit('webrtc-candidate', event.candidate);
+            }
+        };
+
+        socket.on('webrtc-answer', async (answer) => {
+            try {
+                await pc.setRemoteDescription(answer);
+            } catch(e) { console.error("Error setting remote description", e); }
+        });
+
+        socket.on('webrtc-candidate', (candidate) => {
+            try {
+                pc.addIceCandidate(candidate);
+            } catch(e) { console.error("Error adding ICE candidate", e); }
+        });
+
+        pc.createOffer()
+            .then(offer => pc.setLocalDescription(offer))
+            .then(() => {
+                socket.emit('webrtc-offer', pc.localDescription);
+            })
+            .catch(e => console.error("WebRTC offer creation failed", e));
+        // --- End WebRTC Setup ---
     });
 
     socket.on('message', (data) => {
@@ -1085,85 +1285,8 @@ function initializeGame(nickname, color, imageDataUrl) {
                 document.getElementById('chat-console').classList.remove('hidden');
                 break;
             }
-            case S2C_OPCODES.GAME_STATE_UPDATE: {
-                if (!gameReady) return;
-                // Updated cells (Delta-compressed)
-                const updatedCellCount = view.getUint16(offset, true); offset += 2;
-                for(let i=0; i<updatedCellCount; i++) {
-                    const cellId = view.getUint32(offset, true); offset += 4;
-                    const deltaMask = view.getUint8(offset, true); offset += 1;
-                    const cellToUpdate = cellMap.get(cellId);
-
-                    if (cellToUpdate) {
-                        if (deltaMask & 1) { // x
-                            cellToUpdate.serverX = view.getInt16(offset, true); offset += 2;
-                        }
-                        if (deltaMask & 2) { // y
-                            cellToUpdate.serverY = view.getInt16(offset, true); offset += 2;
-                        }
-                        if (deltaMask & 4) { // radius
-                            cellToUpdate.radius = view.getUint16(offset, true) / 10; offset += 2;
-                        }
-                        if (deltaMask & 8) { // score
-                            cellToUpdate.score = view.getUint32(offset, true); offset += 4;
-                        }
-                        if (deltaMask & 16) { // mergeCooldown
-                            cellToUpdate.mergeCooldown = view.getFloat64(offset, true); offset += 8;
-                        }
-                    } else {
-                        // Cell is not known, skip its data to avoid crashing
-                        console.warn(`Received update for unknown cellId: ${cellId}`);
-                        if (deltaMask & 1) offset += 2;
-                        if (deltaMask & 2) offset += 2;
-                        if (deltaMask & 4) offset += 2;
-                        if (deltaMask & 8) offset += 4;
-                        if (deltaMask & 16) offset += 8;
-                    }
-                }
-                // New cells
-                const newCellCount = view.getUint16(offset, true); offset += 2;
-                for (let i = 0; i < newCellCount; i++) {
-                    const idData = readString(view, offset);
-                    const id = idData.value;
-                    offset = idData.newOffset;
-
-                    const cellData = decodeCell(view, offset);
-                    const newCell = cellData.cell;
-                    offset = cellData.newOffset;
-                    newCell.id = id;
-
-                    if (!players[newCell.id]) players[newCell.id] = [];
-                    if (!cellMap.has(newCell.cellId)) {
-                        newCell.serverX = newCell.x;
-                        newCell.serverY = newCell.y;
-                        players[newCell.id].push(newCell);
-                        cellMap.set(newCell.cellId, newCell);
-                        if (newCell.image && !imageCache[newCell.id]) {
-                            const img = new Image();
-                            img.src = newCell.image;
-                            imageCache[newCell.id] = img;
-                        }
-                    }
-                }
-                // Eaten cells
-                const eatenCellCount = view.getUint16(offset, true); offset += 2;
-                for (let i = 0; i < eatenCellCount; i++) {
-                    const eatenId = view.getUint32(offset, true); offset += 4;
-                    const cellToRemove = cellMap.get(eatenId);
-                    if (cellToRemove) {
-                        const ownerId = cellToRemove.id;
-                        if(players[ownerId]) {
-                            const index = players[ownerId].findIndex(c => c.cellId === eatenId);
-                            if (index > -1) {
-                                players[ownerId].splice(index, 1);
-                                if (players[ownerId].length === 0 && ownerId !== DUD_PLAYER_ID) {
-                                    delete players[ownerId];
-                                }
-                            }
-                        }
-                        cellMap.delete(eatenId);
-                    }
-                }
+            case S2C_OPCODES.RELIABLE_UPDATE: {
+                // Now handled by dataChannel.onmessage
                 break;
             }
             case S2C_OPCODES.LEADERBOARD_UPDATE: {
@@ -1240,7 +1363,7 @@ window.addEventListener('mousemove', (e) => {
 
 window.addEventListener('keydown', (e) => {
     if (listeningForBind) return;
-    if (!socket || !socket.connected || !gameReady) return;
+    if (!dataChannel || dataChannel.readyState !== 'open' || !gameReady) return;
     if (!isMobileDevice() && (document.activeElement === chatInput || document.activeElement === nicknameInput)) return;
 
     const action = Object.keys(keybinds.keyboard).find(key => {
@@ -1262,7 +1385,7 @@ window.addEventListener('keydown', (e) => {
             view.setUint8(0, C2S_OPCODES.SPLIT);
             view.setFloat32(1, worldMouseX, true);
             view.setFloat32(5, worldMouseY, true);
-            socket.send(buffer);
+            dataChannel.send(buffer);
             break;
         }
         case 'ejectMass': {
@@ -1271,7 +1394,7 @@ window.addEventListener('keydown', (e) => {
             view.setUint8(0, C2S_OPCODES.EJECT_MASS);
             view.setFloat32(1, worldMouseX, true);
             view.setFloat32(5, worldMouseY, true);
-            socket.send(buffer);
+            dataChannel.send(buffer);
             break;
         }
         case 'openChat':
@@ -1520,7 +1643,7 @@ function setupTouchControls() {
         view.setUint8(0, opcode);
         view.setFloat32(1, worldMouseX, true);
         view.setFloat32(5, worldMouseY, true);
-        socket.send(buffer);
+        if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
     }
 }
 
@@ -1589,7 +1712,7 @@ function gameLoop(currentTime) {
             view.setUint8(0, C2S_OPCODES.PLAYER_INPUT_MOUSE);
             view.setFloat32(1, targetX, true);
             view.setFloat32(5, targetY, true);
-            socket.send(buffer);
+            if (dataChannel && dataChannel.readyState === 'open') dataChannel.send(buffer);
         }
 
         if (shouldSendInput && !gamepadConnected) {
@@ -1741,15 +1864,22 @@ function drawDebugUI(cssHeight) {
     const lineHeight = 20;
     const now = Date.now();
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    const debugHeight = (selfCells.length + 9) * lineHeight + 10;
+    const debugHeight = (selfCells.length + 11) * lineHeight + 10;
     ctx.fillRect(debugX - 5, debugY - 5, 350, debugHeight);
     ctx.font = 'bold 16px Arial';
     ctx.fillStyle = '#00ff00';
     ctx.textAlign = 'left';
-    ctx.fillText('Debug: Cell Cooldowns & Sync', debugX, debugY + lineHeight);
+    ctx.fillText('Debug Info', debugX, debugY + lineHeight);
     ctx.font = '14px monospace';
+
+    // Reliable Protocol Info
+    ctx.fillStyle = '#aadeff';
+    ctx.fillText(`Reliable Protocol:`, debugX, debugY + 2.5 * lineHeight);
+    ctx.fillText(`- Last Processed Seq: ${lastProcessedSeq}`, debugX, debugY + 3.5 * lineHeight);
+    ctx.fillText(`- Packet Buffer Size: ${packetBuffer.size}`, debugX, debugY + 4.5 * lineHeight);
+
     selfCells.forEach((cell, index) => {
-        const y = debugY + (index + 2) * lineHeight;
+        const y = debugY + (index + 6) * lineHeight;
         const cooldownRemaining = Math.max(0, cell.mergeCooldown - now);
         const cooldownSeconds = (cooldownRemaining / 1000).toFixed(1);
         const serverDistance = cell.serverX !== undefined ? Math.hypot(cell.x - cell.serverX, cell.y - cell.serverY) : 0;
@@ -1759,21 +1889,18 @@ function drawDebugUI(cssHeight) {
     });
     const avgSyncDistance = selfCells.reduce((sum, cell) => sum + (cell.serverX !== undefined ? Math.hypot(cell.x - cell.serverX, cell.y - cell.serverY) : 0), 0) / selfCells.length;
     ctx.fillStyle = avgSyncDistance > 5 ? '#ffaa00' : '#66ff66';
-    ctx.fillText(`Avg Sync Distance: ${avgSyncDistance.toFixed(1)}px`, debugX, debugY + (selfCells.length + 2) * lineHeight);
+    ctx.fillText(`Avg Sync Distance: ${avgSyncDistance.toFixed(1)}px`, debugX, debugY + (selfCells.length + 6) * lineHeight);
     const largestRadius = Math.max(...selfCells.map(cell => cell.radius));
     ctx.fillStyle = '#00aaff';
-    ctx.fillText(`Zoom: ${camera.zoom.toFixed(2)}x | Largest: ${largestRadius.toFixed(1)}px | Base: ${baseRadius.toFixed(1)}px`, debugX, debugY + (selfCells.length + 3) * lineHeight);
+    ctx.fillText(`Zoom: ${camera.zoom.toFixed(2)}x | Largest: ${largestRadius.toFixed(1)}px | Base: ${baseRadius.toFixed(1)}px`, debugX, debugY + (selfCells.length + 7) * lineHeight);
     ctx.fillStyle = '#ffaa00';
-    ctx.fillText(`Zoom Multiplier: ${customZoomMultiplier.toFixed(2)}x`, debugX, debugY + (selfCells.length + 4) * lineHeight);
+    ctx.fillText(`Zoom Multiplier: ${customZoomMultiplier.toFixed(2)}x`, debugX, debugY + (selfCells.length + 8) * lineHeight);
     ctx.fillStyle = gamepadConnected ? '#66ff66' : '#ff6666';
-    ctx.fillText(`Controller: ${gamepadConnected ? 'Connected' : 'Disconnected'}`, debugX, debugY + (selfCells.length + 5) * lineHeight);
+    ctx.fillText(`Controller: ${gamepadConnected ? 'Connected' : 'Disconnected'}`, debugX, debugY + (selfCells.length + 9) * lineHeight);
     if (gamepadConnected) {
         ctx.fillStyle = '#00aaff';
-        ctx.fillText(`Deadzone: ${gamepadDeadzone.toFixed(2)} | Vibration: ${gamepadVibrationSupported ? 'Yes' : 'No'}`, debugX, debugY + (selfCells.length + 6) * lineHeight);
+        ctx.fillText(`Deadzone: ${gamepadDeadzone.toFixed(2)} | Vibration: ${gamepadVibrationSupported ? 'Yes' : 'No'}`, debugX, debugY + (selfCells.length + 10) * lineHeight);
     }
-    ctx.fillStyle = '#ffaa00';
-    ctx.fillText(`Frame time: ${frameTimeAccumulator.toFixed(1)}ms | Frame limit: ${settings.frameRateLimit}fps`, debugX, debugY + (selfCells.length + 7) * lineHeight);
-    ctx.fillText(`Render distance: ${settings.renderDistance}px`, debugX, debugY + (selfCells.length + 8) * lineHeight);
 }
 
 // --- Initial Setup & Helper Functions ---

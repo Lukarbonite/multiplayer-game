@@ -1,16 +1,16 @@
 {
-  "name": "multiplayer-game",
+  "name": "multiplayer-game-server",
   "version": "1.0.0",
-  "main": "index.js",
+  "description": "Multiplayer Agar-style game server",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
-    "express": "^5.1.0",
-    "socket.io": "^4.8.1"
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "@roamhq/wrtc": "^0.9.0"
   }
 }
