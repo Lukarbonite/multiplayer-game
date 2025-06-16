@@ -34,6 +34,34 @@
                 <label for="setting-graphics">High Quality Graphics</label>
                 <input type="checkbox" id="setting-graphics">
             </div>
+            <!-- START: ADDED NEW SETTINGS -->
+            <div class="setting-item">
+                <label for="setting-smoothcells">Smooth Cell Animation</label>
+                <input type="checkbox" id="setting-smoothcells">
+            </div>
+            <div class="setting-item">
+                <label for="setting-particles">Particle Effects</label>
+                <input type="checkbox" id="setting-particles">
+            </div>
+            <div class="setting-item">
+                <label for="setting-framerate">Frame Rate Limit</label>
+                <select id="setting-framerate">
+                    <option value="30">30 FPS</option>
+                    <option value="60" selected>60 FPS</option>
+                    <option value="120">120 FPS</option>
+                    <option value="144">144 FPS</option>
+                </select>
+            </div>
+            <div class="setting-item">
+                <label for="setting-renderdistance">Render Distance</label>
+                <select id="setting-renderdistance">
+                    <option value="1000">Low</option>
+                    <option value="1500" selected>Medium</option>
+                    <option value="2000">High</option>
+                    <option value="3000">Ultra</option>
+                </select>
+            </div>
+            <!-- END: ADDED NEW SETTINGS -->
             <div class="setting-item">
                 <label for="setting-nicknames">Show Nicknames</label>
                 <input type="checkbox" id="setting-nicknames">

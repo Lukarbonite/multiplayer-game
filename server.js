@@ -1,6 +1,72 @@
 // server.js
 
-// --- Quadtree Implementation for Collision Detection ---
+// --- Spatial Hashing Implementation for Better Performance ---
+class SpatialHash {
+    constructor(cellSize) {
+        this.cellSize = cellSize;
+        this.buckets = new Map();
+    }
+
+    _hash(x, y) {
+        const cx = Math.floor(x / this.cellSize);
+        const cy = Math.floor(y / this.cellSize);
+        return `${cx},${cy}`;
+    }
+
+    insert(obj) {
+        const x1 = obj.x - obj.radius;
+        const y1 = obj.y - obj.radius;
+        const x2 = obj.x + obj.radius;
+        const y2 = obj.y + obj.radius;
+
+        const startX = Math.floor(x1 / this.cellSize);
+        const endX = Math.floor(x2 / this.cellSize);
+        const startY = Math.floor(y1 / this.cellSize);
+        const endY = Math.floor(y2 / this.cellSize);
+
+        obj._spatialHashes = [];
+        for (let x = startX; x <= endX; x++) {
+            for (let y = startY; y <= endY; y++) {
+                const hash = `${x},${y}`;
+                if (!this.buckets.has(hash)) {
+                    this.buckets.set(hash, []);
+                }
+                this.buckets.get(hash).push(obj);
+                obj._spatialHashes.push(hash);
+            }
+        }
+    }
+
+    query(x, y, radius) {
+        const results = new Set();
+        const x1 = x - radius;
+        const y1 = y - radius;
+        const x2 = x + radius;
+        const y2 = y + radius;
+
+        const startX = Math.floor(x1 / this.cellSize);
+        const endX = Math.floor(x2 / this.cellSize);
+        const startY = Math.floor(y1 / this.cellSize);
+        const endY = Math.floor(y2 / this.cellSize);
+
+        for (let cx = startX; cx <= endX; cx++) {
+            for (let cy = startY; cy <= endY; cy++) {
+                const hash = `${cx},${cy}`;
+                const bucket = this.buckets.get(hash);
+                if (bucket) {
+                    bucket.forEach(obj => results.add(obj));
+                }
+            }
+        }
+        return Array.from(results);
+    }
+
+    clear() {
+        this.buckets.clear();
+    }
+}
+
+// --- Quadtree Implementation (unchanged but included for completeness) ---
 class Quadtree {
     constructor(bounds, maxObjects = 10, maxLevels = 5, level = 0) {
         this.bounds = bounds;
@@ -18,13 +84,9 @@ class Quadtree {
         const x = this.bounds.x;
         const y = this.bounds.y;
 
-        // top right
         this.nodes[0] = new Quadtree({ x: x + subWidth, y: y, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
-        // top left
         this.nodes[1] = new Quadtree({ x: x, y: y, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
-        // bottom left
         this.nodes[2] = new Quadtree({ x: x, y: y + subHeight, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
-        // bottom right
         this.nodes[3] = new Quadtree({ x: x + subWidth, y: y + subHeight, width: subWidth, height: subHeight }, this.maxObjects, this.maxLevels, nextLevel);
     }
 
@@ -95,7 +157,6 @@ class Quadtree {
     }
 }
 
-
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -103,12 +164,14 @@ const socketIo = require('socket.io');
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-    // Optimize Socket.IO for lower latency but allow fallbacks
     pingTimeout: 60000,
     pingInterval: 25000,
-    // Removed transports restriction to allow fallback to polling if needed
     upgrade: true,
-    allowEIO3: true
+    allowEIO3: true,
+    // Add compression
+    perMessageDeflate: {
+        threshold: 1024
+    }
 });
 
 const PORT = 3000;
@@ -139,20 +202,26 @@ const VIRUS_LAUNCH_SPEED = 800;
 
 const DUD_PLAYER_ID = 'duds';
 
+// OPTIMIZATION: Performance settings
+const PHYSICS_UPDATE_RATE = 60; // Hz
+const NETWORK_UPDATE_RATE = 30; // Hz
+const INTEREST_RADIUS = 1500; // Only send updates for objects within this radius
+const SPATIAL_HASH_CELL_SIZE = 200; // Size of spatial hash cells
+
 app.use(express.static('public'));
 
 let players = {};
 let cellIdCounter = 0;
 let playerInputs = {};
 let lastBroadcastState = {};
-// OPTIMIZATION: Initialize Quadtree for the world
-const worldBounds = { x: -WORLD_WIDTH / 2, y: -WORLD_HEIGHT / 2, width: WORLD_WIDTH, height: WORLD_HEIGHT };
-const qtree = new Quadtree(worldBounds);
+let playerInterestAreas = {}; // Track what each player can see
+
+// OPTIMIZATION: Use spatial hash for faster lookups
+const spatialHash = new SpatialHash(SPATIAL_HASH_CELL_SIZE);
 
 function getRadiusFromScore(score) {
     const baseRadius = Math.sqrt(score + CELL_BASE_MASS);
-    // Dynamic scaling: small cells stay closer to original size, large cells grow dramatically
-    const scaleFactor = 1.0 + (score / 100) * 0.8; // Grows from 1.0x to 1.8x as score increases
+    const scaleFactor = 1.0 + (score / 100) * 0.8;
     return baseRadius * Math.min(scaleFactor, 1.8);
 }
 
@@ -195,7 +264,7 @@ function createVirus() {
         type: 'virus',
         id: DUD_PLAYER_ID,
         cellId: cellIdCounter++,
-        ejectionsConsumed: 0,  // Track ejections consumed by this virus
+        ejectionsConsumed: 0,
     };
 }
 
@@ -209,8 +278,34 @@ function initializeGameObjects() {
         players[DUD_PLAYER_ID].push(createVirus());
     }
     lastBroadcastState = {};
+    playerInterestAreas = {};
 }
 initializeGameObjects();
+
+// OPTIMIZATION: Calculate player's interest area (what they can see)
+function calculateInterestArea(playerId) {
+    const playerCells = players[playerId];
+    if (!playerCells || playerCells.length === 0) return null;
+
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+
+    playerCells.forEach(cell => {
+        minX = Math.min(minX, cell.x - INTEREST_RADIUS);
+        maxX = Math.max(maxX, cell.x + INTEREST_RADIUS);
+        minY = Math.min(minY, cell.y - INTEREST_RADIUS);
+        maxY = Math.max(maxY, cell.y + INTEREST_RADIUS);
+    });
+
+    return { minX, maxX, minY, maxY };
+}
+
+// OPTIMIZATION: Check if object is within player's interest area
+function isInInterestArea(obj, interestArea) {
+    if (!interestArea) return false;
+    return obj.x >= interestArea.minX && obj.x <= interestArea.maxX &&
+        obj.y >= interestArea.minY && obj.y <= interestArea.maxY;
+}
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
@@ -226,7 +321,7 @@ io.on('connection', (socket) => {
             radius: getRadiusFromScore(PLAYER_START_SCORE),
             color: data.color || '#ffffff',
             nickname: data.nickname || 'Player',
-            type: 'player', // FIX: Add missing type property
+            type: 'player',
             id: socket.id,
             cellId: cellIdCounter++,
             vx: 0,
@@ -239,16 +334,25 @@ io.on('connection', (socket) => {
             worldMouseY: players[socket.id][0].y
         };
 
-        console.log(`Sending initialState to ${socket.id}`);
+        // OPTIMIZATION: Only send visible objects on initial state
+        const interestArea = calculateInterestArea(socket.id);
+        const visiblePlayers = {};
+
+        for (const [playerId, cells] of Object.entries(players)) {
+            const visibleCells = cells.filter(cell => isInInterestArea(cell, interestArea));
+            if (visibleCells.length > 0) {
+                visiblePlayers[playerId] = visibleCells;
+            }
+        }
+
         socket.emit('initialState', {
-            players: players,
+            players: visiblePlayers,
             world: {
                 width: WORLD_WIDTH,
                 height: WORLD_HEIGHT
             }
         });
 
-        // Send system message to all players about new player joining
         io.emit('systemMessage', {
             message: `${data.nickname} joined the game`,
             timestamp: Date.now()
@@ -263,9 +367,9 @@ io.on('connection', (socket) => {
 
             delete players[socket.id];
             delete playerInputs[socket.id];
+            delete playerInterestAreas[socket.id];
             io.emit('playerDisconnected', socket.id);
 
-            // Send system message about player leaving
             io.emit('systemMessage', {
                 message: `${playerNickname} left the game`,
                 timestamp: Date.now()
@@ -279,12 +383,11 @@ io.on('connection', (socket) => {
 
     socket.on('chatMessage', (data) => {
         if (players[socket.id] && data.message && data.message.trim().length > 0) {
-            const player = players[socket.id][0]; // Get first cell for nickname
-            const message = data.message.trim().substring(0, 100); // Limit message length
+            const player = players[socket.id][0];
+            const message = data.message.trim().substring(0, 100);
 
             console.log(`Chat from ${player.nickname}: ${message}`);
 
-            // Broadcast message to all players
             io.emit('chatMessage', {
                 playerId: socket.id,
                 nickname: player.nickname,
@@ -298,24 +401,21 @@ io.on('connection', (socket) => {
         const playerCells = players[socket.id];
         if (!playerCells || !data || typeof data.mass !== 'number') return;
 
-        const newMass = Math.max(1, Math.min(1000000, data.mass)); // Clamp between 1 and 10000
-        const player = playerCells[0]; // Get first cell for nickname
+        const newMass = Math.max(1, Math.min(1000000, data.mass));
+        const player = playerCells[0];
 
         console.log(`Setting mass for ${player.nickname} to ${newMass}`);
 
-        // Update all player cells to the new mass
         playerCells.forEach(cell => {
             cell.score = newMass;
             cell.radius = getRadiusFromScore(newMass);
         });
 
-        // Send confirmation message to player
         socket.emit('systemMessage', {
             message: `Mass set to ${newMass}`,
             timestamp: Date.now()
         });
 
-        // Optionally broadcast to all players that this player's mass changed
         io.emit('systemMessage', {
             message: `${player.nickname} set their mass to ${newMass}`,
             timestamp: Date.now()
@@ -323,10 +423,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerInput', (input) => {
-        const {
-            worldMouseX,
-            worldMouseY
-        } = input;
+        const { worldMouseX, worldMouseY } = input;
         if (typeof worldMouseX === 'number' && typeof worldMouseY === 'number') {
             playerInputs[socket.id] = {
                 worldMouseX,
@@ -339,7 +436,6 @@ io.on('connection', (socket) => {
         const playerCells = players[socket.id];
         if (!playerCells || !data) return;
 
-        // MODIFIED: Expect mouseX and mouseY instead of direction
         const { mouseX, mouseY } = data;
         if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
 
@@ -348,7 +444,6 @@ io.on('connection', (socket) => {
         for (let i = cellsToSplit - 1; i >= 0; i--) {
             const cell = playerCells[i];
             if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
-                // MODIFIED: Calculate direction from THIS cell to mouse position
                 let dx = mouseX - cell.x;
                 let dy = mouseY - cell.y;
                 const len = Math.hypot(dx, dy);
@@ -357,12 +452,10 @@ io.on('connection', (socket) => {
                     dx /= len;
                     dy /= len;
                 } else {
-                    // Fallback direction if mouse is exactly on cell
                     dx = 0;
                     dy = -1;
                 }
 
-                // Split mass into integers, giving extra to the new cell
                 const score1 = Math.floor(cell.score / 2);
                 const score2 = cell.score - score1;
 
@@ -389,18 +482,15 @@ io.on('connection', (socket) => {
         }
     });
 
-
     socket.on('ejectMass', (data) => {
         const playerCells = players[socket.id];
         if (!playerCells || !data) return;
 
-        // MODIFIED: Expect mouseX and mouseY instead of direction
         const { mouseX, mouseY } = data;
         if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
 
         playerCells.forEach(cell => {
             if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
-                // MODIFIED: Calculate direction from THIS cell to mouse position
                 let dx = mouseX - cell.x;
                 let dy = mouseY - cell.y;
                 const len = Math.hypot(dx, dy);
@@ -409,7 +499,6 @@ io.on('connection', (socket) => {
                     dx /= len;
                     dy /= len;
                 } else {
-                    // Fallback direction if mouse is exactly on cell
                     dx = 0;
                     dy = -1;
                 }
@@ -436,14 +525,32 @@ io.on('connection', (socket) => {
         });
     });
 
-    // Handle ping requests for latency measurement
     socket.on('ping', () => {
         socket.emit('pong');
     });
 });
 
-// Game Logic Loop (runs at 60Hz)
+// OPTIMIZATION: Separate physics update from network update
+let physicsAccumulator = 0;
+let lastPhysicsTime = Date.now();
+
+// Game Physics Loop (runs at configurable rate)
 setInterval(() => {
+    const currentTime = Date.now();
+    const deltaTime = (currentTime - lastPhysicsTime) / 1000;
+    lastPhysicsTime = currentTime;
+
+    physicsAccumulator += deltaTime;
+
+    // Fixed timestep physics
+    const physicsStep = 1 / PHYSICS_UPDATE_RATE;
+    while (physicsAccumulator >= physicsStep) {
+        updatePhysics(physicsStep);
+        physicsAccumulator -= physicsStep;
+    }
+}, 1000 / PHYSICS_UPDATE_RATE);
+
+function updatePhysics(deltaTime) {
     // Phase 1: Player Movement
     for (const playerId in players) {
         if (playerId === DUD_PLAYER_ID) continue;
@@ -462,8 +569,8 @@ setInterval(() => {
                 if (len > cell.radius) {
                     const normalizedX = dx / len;
                     const normalizedY = dy / len;
-                    cell.x += normalizedX * speed * speedFactor;
-                    cell.y += normalizedY * speed * speedFactor;
+                    cell.x += normalizedX * speed * speedFactor * deltaTime * 60;
+                    cell.y += normalizedY * speed * speedFactor * deltaTime * 60;
                 }
             });
         }
@@ -473,8 +580,8 @@ setInterval(() => {
     for (const playerId in players) {
         for (const cell of players[playerId]) {
             if (cell.launch_vx !== undefined && cell.launch_vy !== undefined) {
-                cell.x += cell.launch_vx * (1 / 60);
-                cell.y += cell.launch_vy * (1 / 60);
+                cell.x += cell.launch_vx * deltaTime;
+                cell.y += cell.launch_vy * deltaTime;
                 cell.launch_vx *= PLAYER_SPLIT_LAUNCH_DECAY;
                 cell.launch_vy *= PLAYER_SPLIT_LAUNCH_DECAY;
 
@@ -486,41 +593,26 @@ setInterval(() => {
         }
     }
 
-    // --- Phase 3: Consumption Detection (OPTIMIZED WITH QUADTREE) ---
-    qtree.clear();
+    // OPTIMIZATION: Build spatial hash
+    spatialHash.clear();
     const allCells = Object.values(players).flat();
     for (const cell of allCells) {
-        qtree.insert({
-            x: cell.x - cell.radius,
-            y: cell.y - cell.radius,
-            width: cell.radius * 2,
-            height: cell.radius * 2,
-            cell: cell // Reference to the original cell object
-        });
+        spatialHash.insert(cell);
     }
 
+    // Phase 3: Consumption Detection (using spatial hash)
     const consumptions = [];
     const involvedCellIds = new Set();
 
     for (const c1 of allCells) {
         if (involvedCellIds.has(c1.cellId)) continue;
 
-        const queryBounds = {
-            x: c1.x - c1.radius,
-            y: c1.y - c1.radius,
-            width: c1.radius * 2,
-            height: c1.radius * 2,
-        };
+        const potentialColliders = spatialHash.query(c1.x, c1.y, c1.radius);
 
-        const potentialColliders = qtree.retrieve([], queryBounds);
-
-        for (const potential of potentialColliders) {
-            const c2 = potential.cell;
-
-            if (c1.cellId === c2.cellId) continue; // Don't check against self
+        for (const c2 of potentialColliders) {
+            if (c1.cellId === c2.cellId) continue;
             if (involvedCellIds.has(c2.cellId)) continue;
 
-            // Skip if same ID UNLESS it's different types within DUD_PLAYER_ID (virus vs ejection)
             if (c1.id === c2.id && !(c1.id === DUD_PLAYER_ID && c1.type !== c2.type)) continue;
 
             const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
@@ -562,33 +654,26 @@ setInterval(() => {
         }
     }
 
-
     // Phase 3.5: Consumption Resolution
     for (const consumption of consumptions) {
         if (consumption.type === 'virusEjectionInteraction') {
             const { virus, ejection } = consumption;
 
-            // Increment the virus's ejection counter
             virus.ejectionsConsumed = (virus.ejectionsConsumed || 0) + 1;
 
-            // OPTIMIZATION: Use splice instead of filter for performance
             const dudPlayerCells = players[DUD_PLAYER_ID];
             const ejectionIndex = dudPlayerCells.findIndex(c => c.cellId === ejection.cellId);
             if(ejectionIndex > -1) dudPlayerCells.splice(ejectionIndex, 1);
 
-            // Check if virus should split (after consuming 7 ejections)
             if (virus.ejectionsConsumed >= VIRUS_EJECTIONS_TO_SPLIT) {
-                // Calculate split direction based on ejection's velocity or position
                 let dx, dy;
 
-                // First try to use ejection's velocity if it exists
                 if (ejection.launch_vx !== undefined && ejection.launch_vy !== undefined) {
                     const velocity = Math.hypot(ejection.launch_vx, ejection.launch_vy);
                     if (velocity > 0.1) {
                         dx = ejection.launch_vx / velocity;
                         dy = ejection.launch_vy / velocity;
                     } else {
-                        // Velocity too small, use position-based direction
                         dx = ejection.x - virus.x;
                         dy = ejection.y - virus.y;
                         const len = Math.hypot(dx, dy);
@@ -601,7 +686,6 @@ setInterval(() => {
                         }
                     }
                 } else {
-                    // No velocity data, use position-based direction
                     dx = ejection.x - virus.x;
                     dy = ejection.y - virus.y;
                     const len = Math.hypot(dx, dy);
@@ -614,27 +698,23 @@ setInterval(() => {
                     }
                 }
 
-                // Create new virus with same mass, launched in ejection direction
-                const launchSpeed = VIRUS_LAUNCH_SPEED; // Virus split speed
+                const launchSpeed = VIRUS_LAUNCH_SPEED;
                 const newVirus = {
                     x: virus.x + dx * (virus.radius + 5),
                     y: virus.y + dy * (virus.radius + 5),
-                    score: virus.score, // Same mass as original
+                    score: virus.score,
                     radius: virus.radius,
                     color: VIRUS_COLOR,
                     nickname: '',
                     type: 'virus',
                     id: DUD_PLAYER_ID,
                     cellId: cellIdCounter++,
-                    ejectionsConsumed: 0, // Reset counter
+                    ejectionsConsumed: 0,
                     launch_vx: dx * launchSpeed,
                     launch_vy: dy * launchSpeed
                 };
 
-                // Reset original virus's counter
                 virus.ejectionsConsumed = 0;
-
-                // Add new virus to the game
                 players[DUD_PLAYER_ID].push(newVirus);
             }
         } else if (consumption.type === 'virusPlayerInteraction') {
@@ -642,53 +722,41 @@ setInterval(() => {
             const playerCells = players[player.id];
             const playerCellCount = playerCells.length;
 
-            // Case 1: Player is at or above the cell limit. Absorb virus for score.
             if (playerCellCount >= 16) {
-                // Find the specific cell that hit the virus
                 const hittingCell = playerCells.find(c => c.cellId === player.cellId);
                 if (hittingCell) {
-                    hittingCell.score += virus.score; // Gain full virus score
+                    hittingCell.score += virus.score;
                     hittingCell.radius = getRadiusFromScore(hittingCell.score);
                 }
 
-                // Remove the consumed virus
                 const dudPlayerCells = players[DUD_PLAYER_ID];
                 const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
                 if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
 
             } else {
-                // Case 2: Player has room to split.
-
-                // The cell that hit the virus
                 const hittingCell = playerCells.find(c => c.cellId === player.cellId);
-                if (!hittingCell) continue; // Should not happen, but a good guard
+                if (!hittingCell) continue;
 
-                hittingCell.score += VIRUS_CONSUME_SCORE_GAIN_SPLIT; // Gain 10 points for splitting
+                hittingCell.score += VIRUS_CONSUME_SCORE_GAIN_SPLIT;
 
-                // The number of pieces the hitting cell will shatter into.
                 const desiredSplitCount = Math.floor(hittingCell.score / PLAYER_MIN_SPLIT_SCORE) || 2;
-
-                // The number of additional cells we can create without exceeding the 16-cell limit.
                 const availableSlots = 16 - playerCellCount;
                 const additionalCellsToCreate = Math.min(desiredSplitCount - 1, availableSlots);
                 const finalSplitCount = additionalCellsToCreate + 1;
 
-                // If we can't even split into 2 pieces, just absorb the 10 points and don't split.
                 if (finalSplitCount <= 1) {
                     const dudPlayerCells = players[DUD_PLAYER_ID];
                     const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
                     if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
-                    continue; // Skip to next consumption
+                    continue;
                 }
 
-                // MODIFIED: Split the hitting cell's mass into integers
                 const totalScoreToSplit = hittingCell.score;
                 const baseScore = Math.floor(totalScoreToSplit / finalSplitCount);
                 let remainder = totalScoreToSplit % finalSplitCount;
                 const newCells = [];
 
                 for (let i = 0; i < finalSplitCount; i++) {
-                    // Distribute the remainder mass (1 point at a time) to the first 'remainder' cells
                     const currentCellScore = baseScore + (remainder > 0 ? 1 : 0);
                     if (remainder > 0) {
                         remainder--;
@@ -698,13 +766,11 @@ setInterval(() => {
                     const launchSpeed = 50 + Math.random() * 100;
 
                     newCells.push({
-                        // Copy fundamental properties from the cell that was hit
                         ...hittingCell,
-                        // Overwrite with new properties for the new smaller cell
                         cellId: cellIdCounter++,
                         score: currentCellScore,
                         radius: getRadiusFromScore(currentCellScore),
-                        x: hittingCell.x + Math.cos(angle) * (hittingCell.radius * 0.2), // spawn closer to center
+                        x: hittingCell.x + Math.cos(angle) * (hittingCell.radius * 0.2),
                         y: hittingCell.y + Math.sin(angle) * (hittingCell.radius * 0.2),
                         mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
                         launch_vx: Math.cos(angle) * launchSpeed,
@@ -712,19 +778,17 @@ setInterval(() => {
                     });
                 }
 
-                // Replace the single large cell with multiple smaller ones
                 const playerIndex = playerCells.findIndex(c => c.cellId === hittingCell.cellId);
                 if (playerIndex !== -1) {
                     playerCells.splice(playerIndex, 1, ...newCells);
                 }
 
-                // Remove the consumed virus
                 const dudPlayerCells = players[DUD_PLAYER_ID];
                 const virusIndex = dudPlayerCells.findIndex(c => c.cellId === virus.cellId);
                 if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
             }
 
-        } else { // Regular consumption
+        } else {
             const { bigger, smaller } = consumption;
             const ownerCells = players[bigger.id];
             if (ownerCells) {
@@ -735,10 +799,8 @@ setInterval(() => {
                 }
             }
 
-            // Remove the consumed cell
             const smallerOwnerId = smaller.id;
             if (players[smallerOwnerId]) {
-                // OPTIMIZATION: Use splice instead of filter
                 const smallerPlayerCells = players[smallerOwnerId];
                 const smallerIndex = smallerPlayerCells.findIndex(c => c.cellId === smaller.cellId);
                 if (smallerIndex > -1) {
@@ -772,9 +834,7 @@ setInterval(() => {
                 const distance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
                 const combinedRadius = c1.radius + c2.radius;
 
-                // Both cells are past their merge cooldown - they can merge
                 if (c1.mergeCooldown <= now && c2.mergeCooldown <= now) {
-                    // Determine which cell is larger
                     let bigger, smaller;
                     if (c1.radius > c2.radius) {
                         bigger = c1;
@@ -784,68 +844,54 @@ setInterval(() => {
                         smaller = c1;
                     }
 
-                    // Merge when larger cell touches the center of smaller cell
                     if (distance < bigger.radius) {
-                        // Merge the cells (always merge into c1 for consistency)
                         const originalC1Score = c1.score;
                         c1.score += c2.score;
                         c1.radius = getRadiusFromScore(c1.score);
 
-                        // Position merged cell at weighted center based on mass
                         const totalScore = c1.score;
                         const weight1 = originalC1Score / totalScore;
                         const weight2 = c2.score / totalScore;
                         c1.x = c1.x * weight1 + c2.x * weight2;
                         c1.y = c1.y * weight1 + c2.y * weight2;
 
-                        // Remove the merged cell
                         playerCells.splice(j, 1);
-                        j--; // Adjust index
+                        j--;
 
-                        // Keep the maximum cooldown of the two cells instead of resetting
-                        // This prevents merge penalty when cells are reuniting
                         c1.mergeCooldown = Math.max(c1.mergeCooldown, c2.mergeCooldown);
-                        continue; // Skip repulsion since we merged
+                        continue;
                     }
                 }
 
-                // Repulsion logic - ONLY applies when cells are in cooldown
                 const isInCooldown = c1.mergeCooldown > now || c2.mergeCooldown > now;
 
                 if (isInCooldown && distance < combinedRadius) {
                     const overlap = combinedRadius - distance;
 
-                    // Calculate masses for realistic repulsion
                     const mass1 = c1.score + CELL_BASE_MASS;
                     const mass2 = c2.score + CELL_BASE_MASS;
                     const totalMass = mass1 + mass2;
 
-                    // Gentle repulsion only during cooldown
                     const repulsionForce = overlap * 1.5;
 
-                    // Calculate movement based on inverse mass proportion
                     const move1 = (repulsionForce * mass2 / totalMass);
                     const move2 = (repulsionForce * mass1 / totalMass);
 
-                    // Calculate direction
                     let dx, dy;
                     if (distance > 0.001) {
                         dx = (c1.x - c2.x) / distance;
                         dy = (c1.y - c2.y) / distance;
                     } else {
-                        // If cells are exactly on top of each other, push in random directions
                         const angle = Math.random() * Math.PI * 2;
                         dx = Math.cos(angle);
                         dy = Math.sin(angle);
                     }
 
-                    // Apply repulsion movement
                     c1.x += dx * move1;
                     c1.y += dy * move1;
                     c2.x -= dx * move2;
                     c2.y -= dy * move2;
 
-                    // Ensure minimum separation during cooldown
                     const minSeparation = combinedRadius * 1.05;
                     const newDistance = Math.hypot(c1.x - c2.x, c1.y - c2.y);
 
@@ -854,7 +900,6 @@ setInterval(() => {
                         const additionalMove1 = (additionalSeparation * mass2 / totalMass) * 0.2;
                         const additionalMove2 = (additionalSeparation * mass1 / totalMass) * 0.2;
 
-                        // Recalculate direction with new positions
                         const newDx = newDistance > 0.001 ? (c1.x - c2.x) / newDistance : dx;
                         const newDy = newDistance > 0.001 ? (c1.y - c2.y) / newDistance : dy;
 
@@ -868,25 +913,22 @@ setInterval(() => {
         }
     }
 
-    // UNIVERSAL BOUNDARY CLAMPING - Apply to ALL cells including ejected masses
+    // Universal boundary clamping
     const halfWidth = WORLD_WIDTH / 2;
     const halfHeight = WORLD_HEIGHT / 2;
 
     for (const playerId in players) {
         const playerCells = players[playerId];
         for (const cell of playerCells) {
-            // Clamp all cells (players, ejected masses, pellets, viruses) to world boundaries
             cell.x = Math.max(-halfWidth + cell.radius, Math.min(halfWidth - cell.radius, cell.x));
             cell.y = Math.max(-halfHeight + cell.radius, Math.min(halfHeight - cell.radius, cell.y));
 
-            // If a launched cell hits the boundary, reduce its velocity to prevent bouncing
             if (cell.launch_vx !== undefined && cell.launch_vy !== undefined) {
-                // If the cell is at the boundary, dampen the velocity in that direction
                 if (cell.x <= -halfWidth + cell.radius || cell.x >= halfWidth - cell.radius) {
-                    cell.launch_vx *= 0.3; // Reduce horizontal velocity when hitting side walls
+                    cell.launch_vx *= 0.3;
                 }
                 if (cell.y <= -halfHeight + cell.radius || cell.y >= halfHeight - cell.radius) {
-                    cell.launch_vy *= 0.3; // Reduce vertical velocity when hitting top/bottom walls
+                    cell.launch_vy *= 0.3;
                 }
             }
         }
@@ -900,76 +942,97 @@ setInterval(() => {
     if (dudCells.filter(c => c.type === 'virus').length < VIRUS_COUNT) {
         players[DUD_PLAYER_ID].push(createVirus());
     }
-}, 1000 / 60);
+}
 
-// Network Broadcast Loop (runs at 30Hz) - MODIFIED FOR PERFORMANCE
+// OPTIMIZATION: Network broadcast with interest management
 setInterval(() => {
     if (Object.keys(players).length === 0) return;
 
-    const updatePackage = {
-        updatedCells: [],
-        newCells: [],
-        eatenCellIds: [],
-    };
+    // Update interest areas for all players
+    Object.keys(players).forEach(playerId => {
+        if (playerId !== DUD_PLAYER_ID) {
+            playerInterestAreas[playerId] = calculateInterestArea(playerId);
+        }
+    });
 
-    const currentCellIds = new Set();
-    const allCurrentCells = Object.values(players).flat();
+    // Send updates to each player based on their interest area
+    for (const playerId in players) {
+        if (playerId === DUD_PLAYER_ID) continue;
 
-    for (const cell of allCurrentCells) {
-        currentCellIds.add(cell.cellId);
-        const oldCellState = lastBroadcastState[cell.cellId];
+        const interestArea = playerInterestAreas[playerId];
+        if (!interestArea) continue;
 
-        if (!oldCellState) {
-            // NEW CELL: Send everything, including image
-            const newCell = { ...cell };
-            delete newCell.launch_vx;
-            delete newCell.launch_vy;
-            updatePackage.newCells.push(newCell);
-        } else {
-            // EXISTING CELL: Only send minimal changed data
-            const dx = cell.x - oldCellState.x;
-            const dy = cell.y - oldCellState.y;
-            const dr = cell.radius - oldCellState.radius;
+        const updatePackage = {
+            updatedCells: [],
+            newCells: [],
+            eatenCellIds: [],
+        };
 
-            if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(dr) > 0.1) {
-                // OPTIMIZATION: Send a minimal update object and round values
-                const updatedCellData = {
-                    cellId: cell.cellId,
-                    id: cell.id,
-                    x: Math.round(cell.x * 10) / 10,
-                    y: Math.round(cell.y * 10) / 10,
-                    radius: Math.round(cell.radius * 10) / 10,
-                    score: Math.round(cell.score),
-                };
-                if (cell.mergeCooldown !== oldCellState.mergeCooldown) {
-                    updatedCellData.mergeCooldown = cell.mergeCooldown;
+        const playerLastState = lastBroadcastState[playerId] || {};
+        const currentCellIds = new Set();
+
+        // Check all cells within interest area
+        const allCurrentCells = Object.values(players).flat();
+
+        for (const cell of allCurrentCells) {
+            if (!isInInterestArea(cell, interestArea)) continue;
+
+            currentCellIds.add(cell.cellId);
+            const oldCellState = playerLastState[cell.cellId];
+
+            if (!oldCellState) {
+                const newCell = { ...cell };
+                delete newCell.launch_vx;
+                delete newCell.launch_vy;
+                updatePackage.newCells.push(newCell);
+            } else {
+                const dx = cell.x - oldCellState.x;
+                const dy = cell.y - oldCellState.y;
+                const dr = cell.radius - oldCellState.radius;
+
+                if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(dr) > 0.1) {
+                    const updatedCellData = {
+                        cellId: cell.cellId,
+                        id: cell.id,
+                        x: Math.round(cell.x * 10) / 10,
+                        y: Math.round(cell.y * 10) / 10,
+                        radius: Math.round(cell.radius * 10) / 10,
+                        score: Math.round(cell.score),
+                    };
+                    if (cell.mergeCooldown !== oldCellState.mergeCooldown) {
+                        updatedCellData.mergeCooldown = cell.mergeCooldown;
+                    }
+                    updatePackage.updatedCells.push(updatedCellData);
                 }
-                updatePackage.updatedCells.push(updatedCellData);
             }
         }
-    }
 
-    for (const cellId in lastBroadcastState) {
-        if (!currentCellIds.has(parseInt(cellId))) {
-            updatePackage.eatenCellIds.push(parseInt(cellId));
+        // Check for eaten cells that were previously visible
+        for (const cellId in playerLastState) {
+            if (!currentCellIds.has(parseInt(cellId))) {
+                updatePackage.eatenCellIds.push(parseInt(cellId));
+            }
         }
-    }
 
-    if (updatePackage.newCells.length > 0 || updatePackage.updatedCells.length > 0 || updatePackage.eatenCellIds.length > 0) {
-        io.emit('gameStateUpdate', updatePackage);
-    }
+        if (updatePackage.newCells.length > 0 || updatePackage.updatedCells.length > 0 || updatePackage.eatenCellIds.length > 0) {
+            io.to(playerId).emit('gameStateUpdate', updatePackage);
+        }
 
-    // Update the last broadcast state cache
-    lastBroadcastState = {};
-    allCurrentCells.forEach(cell => {
-        lastBroadcastState[cell.cellId] = {
-            x: cell.x,
-            y: cell.y,
-            radius: cell.radius,
-            mergeCooldown: cell.mergeCooldown,
-        };
-    });
-}, 1000 / 30);
+        // Update the player's last broadcast state
+        const newPlayerState = {};
+        allCurrentCells.forEach(cell => {
+            if (isInInterestArea(cell, interestArea)) {
+                newPlayerState[cell.cellId] = {
+                    x: cell.x,
+                    y: cell.y,
+                    radius: cell.radius,
+                    mergeCooldown: cell.mergeCooldown,
+                };
+            }
+        });
+        lastBroadcastState[playerId] = newPlayerState;
+    }
+}, 1000 / NETWORK_UPDATE_RATE);
 
 server.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT}`);

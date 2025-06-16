@@ -199,6 +199,29 @@ canvas {
     background-color: white;
 }
 
+/* START: ADDED CSS FOR NEW SETTINGS */
+#performance-settings select {
+    background-color: #34495e;
+    color: white;
+    border: 1px solid #4a6278;
+    border-radius: 5px;
+    padding: 7px;
+    font-size: 14px;
+    cursor: pointer;
+    min-width: 110px; /* Aligns dropdowns neatly */
+    transition: border-color 0.2s;
+}
+
+#performance-settings select:hover {
+    border-color: #95a5a6;
+}
+
+#performance-settings select:focus {
+    outline: none;
+    border-color: #3498db;
+}
+/* END: ADDED CSS FOR NEW SETTINGS */
+
 .settings-info {
     font-size: 13px;
     color: #bdc3c7;

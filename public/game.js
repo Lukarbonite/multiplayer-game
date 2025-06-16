@@ -9,62 +9,81 @@ let players = {};
 let imageCache = {};
 let world = { width: 4000, height: 4000 };
 let gameReady = false;
-let baseRadius = 20; // Store the starting radius for zoom calculations
-let debugMode = false; // Debug mode toggle (default off)
-let customZoomMultiplier = 1.0; // Custom zoom multiplier for /zoom command
-let activeInputTarget = null; // MODIFIED: Tracks which input the mobile keyboard is for
+let baseRadius = 20;
+let debugMode = false;
+let customZoomMultiplier = 1.0;
+let activeInputTarget = null;
+
+// OPTIMIZATION: Performance monitoring
+let frameCount = 0;
+let fps = 0;
+let lastFpsUpdate = 0;
+let lastFrameTime = 0;
+let frameTimeAccumulator = 0;
+
+// OPTIMIZATION: Render caching
+let leaderboardCache = null;
+let leaderboardCacheTime = 0;
+const LEADERBOARD_CACHE_DURATION = 500; // Update leaderboard every 500ms
 
 // NEW: Performance Settings
 let settings = {
-    highResolution: !isMobileDevice(), // Default on for desktop, off for mobile
+    highResolution: !isMobileDevice(),
     highQualityGraphics: true,
     showNicknames: true,
-    showImages: true
+    showImages: true,
+    frameRateLimit: 60, // NEW: Frame rate limit
+    renderDistance: 1500, // NEW: Render distance
+    particleEffects: true, // NEW: Particle effects
+    smoothCells: true // NEW: Smooth cell rendering
 };
 
 // Xbox 360 Controller variables
 let gamepadConnected = false;
 let gamepadIndex = -1;
-let gamepadDeadzone = 0.15; // Deadzone for analog sticks
-let gamepadButtonStates = {}; // Track button press states for edge detection
+let gamepadDeadzone = 0.15;
+let gamepadButtonStates = {};
 let gamepadVibrationSupported = false;
 
-const MINIMAP_SIZE = 200; // Default minimap size
-const MINIMAP_SIZE_MOBILE = 120; // Smaller minimap size for mobile
-const MINIMAP_MARGIN = 20; // Default minimap margin
-const MINIMAP_DOT_SIZE = 4; // Default minimap dot size
-const DUD_PLAYER_ID = 'duds'; // ID for non-player objects
-const CAMERA_DEAD_ZONE_RADIUS = 100; // Camera dead zone radius
-let camera = { x: 0, y: 0, zoom: 1.0 }; // Camera position and zoom
-let mousePos = { x: 0, y: 0 }; // Mouse position
+const MINIMAP_SIZE = 200;
+const MINIMAP_SIZE_MOBILE = 120;
+const MINIMAP_MARGIN = 20;
+const MINIMAP_DOT_SIZE = 4;
+const DUD_PLAYER_ID = 'duds';
+const CAMERA_DEAD_ZONE_RADIUS = 100;
+let camera = { x: 0, y: 0, zoom: 1.0 };
+let mousePos = { x: 0, y: 0 };
 
-let currentPing = 0; // Current ping in milliseconds
-let lastPingTime = 0; // Last time ping was measured
+let currentPing = 0;
+let lastPingTime = 0;
 
 // --- DOM Elements ---
-const startScreen = document.getElementById('start-screen'); // Start screen element
-const nicknameInput = document.getElementById('nickname-input'); // Nickname input field
-const colorPicker = document.getElementById('color-picker'); // Color picker input
-const imagePicker = document.getElementById('image-picker'); // Image picker input
-const playButton = document.getElementById('play-button'); // Play button
-const errorMessage = document.getElementById('error-message'); // Error message element
-const finalScoreElement = document.getElementById('final-score'); // Final score display
-const chatMessages = document.getElementById('chat-messages'); // Chat messages container
-const chatInput = document.getElementById('chat-input'); // Chat input field
+const startScreen = document.getElementById('start-screen');
+const nicknameInput = document.getElementById('nickname-input');
+const colorPicker = document.getElementById('color-picker');
+const imagePicker = document.getElementById('image-picker');
+const playButton = document.getElementById('play-button');
+const errorMessage = document.getElementById('error-message');
+const finalScoreElement = document.getElementById('final-score');
+const chatMessages = document.getElementById('chat-messages');
+const chatInput = document.getElementById('chat-input');
 
-// NEW: Performance Settings Elements
+// Performance Settings Elements
 const settingResolution = document.getElementById('setting-resolution');
 const settingGraphics = document.getElementById('setting-graphics');
 const settingNicknames = document.getElementById('setting-nicknames');
 const settingImages = document.getElementById('setting-images');
+const settingFrameRate = document.getElementById('setting-framerate');
+const settingRenderDistance = document.getElementById('setting-renderdistance');
+const settingParticles = document.getElementById('setting-particles');
+const settingSmoothCells = document.getElementById('setting-smoothcells');
 
 // Mobile keyboard elements
 const mobileKeyboard = document.getElementById('mobile-keyboard');
 const keyboardClose = document.getElementById('keyboard-close');
 const keyboardKeys = document.getElementById('keyboard-keys');
 
-
-// --- NEW: Settings Management ---
+// --- Settings Management ---
 function saveSettings() {
     try {
         localStorage.setItem('agarGameSettings', JSON.stringify(settings));
@@ -78,72 +97,105 @@ function loadSettings() {
         const savedSettings = localStorage.getItem('agarGameSettings');
         if (savedSettings) {
             const parsedSettings = JSON.parse(savedSettings);
-            // Merge saved settings with defaults to avoid errors if new settings are added
             settings = { ...settings, ...parsedSettings };
         }
     } catch (e) {
         console.error("Could not load settings from localStorage.", e);
-        // Fallback to defaults
         settings = {
             highResolution: !isMobileDevice(),
             highQualityGraphics: true,
             showNicknames: true,
-            showImages: true
+            showImages: true,
+            frameRateLimit: 60,
+            renderDistance: 1500,
+            particleEffects: true,
+            smoothCells: true
         };
     }
     updateSettingsUI();
 }
 
 function updateSettingsUI() {
-    settingResolution.checked = settings.highResolution;
-    settingGraphics.checked = settings.highQualityGraphics;
-    settingNicknames.checked = settings.showNicknames;
-    settingImages.checked = settings.showImages;
+    if (settingResolution) settingResolution.checked = settings.highResolution;
+    if (settingGraphics) settingGraphics.checked = settings.highQualityGraphics;
+    if (settingNicknames) settingNicknames.checked = settings.showNicknames;
+    if (settingImages) settingImages.checked = settings.showImages;
+    if (settingFrameRate) settingFrameRate.value = settings.frameRateLimit;
+    if (settingRenderDistance) settingRenderDistance.value = settings.renderDistance;
+    if (settingParticles) settingParticles.checked = settings.particleEffects;
+    if (settingSmoothCells) settingSmoothCells.checked = settings.smoothCells;
 }
 
 function setupSettingsListeners() {
-    settingResolution.addEventListener('change', () => {
-        settings.highResolution = settingResolution.checked;
-        saveSettings();
-        resizeCanvas(); // Re-render canvas with new resolution
-    });
-    settingGraphics.addEventListener('change', () => {
-        settings.highQualityGraphics = settingGraphics.checked;
-        saveSettings();
-    });
-    settingNicknames.addEventListener('change', () => {
-        settings.showNicknames = settingNicknames.checked;
-        saveSettings();
-    });
-    settingImages.addEventListener('change', () => {
-        settings.showImages = settingImages.checked;
-        saveSettings();
-    });
+    if (settingResolution) {
+        settingResolution.addEventListener('change', () => {
+            settings.highResolution = settingResolution.checked;
+            saveSettings();
+            resizeCanvas();
+        });
+    }
+    if (settingGraphics) {
+        settingGraphics.addEventListener('change', () => {
+            settings.highQualityGraphics = settingGraphics.checked;
+            saveSettings();
+        });
+    }
+    if (settingNicknames) {
+        settingNicknames.addEventListener('change', () => {
+            settings.showNicknames = settingNicknames.checked;
+            saveSettings();
+        });
+    }
+    if (settingImages) {
+        settingImages.addEventListener('change', () => {
+            settings.showImages = settingImages.checked;
+            saveSettings();
+        });
+    }
+    if (settingFrameRate) {
+        settingFrameRate.addEventListener('change', () => {
+            settings.frameRateLimit = parseInt(settingFrameRate.value);
+            saveSettings();
+        });
+    }
+    if (settingRenderDistance) {
+        settingRenderDistance.addEventListener('change', () => {
+            settings.renderDistance = parseInt(settingRenderDistance.value);
+            saveSettings();
+        });
+    }
+    if (settingParticles) {
+        settingParticles.addEventListener('change', () => {
+            settings.particleEffects = settingParticles.checked;
+            saveSettings();
+        });
+    }
+    if (settingSmoothCells) {
+        settingSmoothCells.addEventListener('change', () => {
+            settings.smoothCells = settingSmoothCells.checked;
+            saveSettings();
+        });
+    }
 }
-// --- End of Settings Management ---
 
 // --- Xbox 360 Controller Setup ---
 function setupGamepadSupport() {
     console.log('Setting up Xbox 360 controller support...');
 
-    // Check if gamepad API is supported
     if (!('getGamepads' in navigator)) {
         console.log('Gamepad API not supported in this browser');
         return;
     }
 
-    // Listen for gamepad connection events
     window.addEventListener('gamepadconnected', (e) => {
         console.log('Gamepad connected:', e.gamepad.id);
 
-        // Check if it's an Xbox controller (various ID patterns)
         const gamepadId = e.gamepad.id.toLowerCase();
         if (gamepadId.includes('xbox') || gamepadId.includes('xinput') || gamepadId.includes('360')) {
             gamepadConnected = true;
             gamepadIndex = e.gamepad.index;
             gamepadVibrationSupported = e.gamepad.vibrationActuator !== undefined;
 
-            // Initialize button states
             gamepadButtonStates = {};
             for (let i = 0; i < e.gamepad.buttons.length; i++) {
                 gamepadButtonStates[i] = false;
@@ -166,7 +218,6 @@ function setupGamepadSupport() {
         }
     });
 
-    // Start the gamepad polling loop
     pollGamepad();
 }
 
@@ -178,13 +229,11 @@ function pollGamepad() {
         if (gamepad) {
             handleGamepadInput(gamepad);
         } else {
-            // Gamepad was disconnected
             gamepadConnected = false;
             gamepadIndex = -1;
         }
     }
 
-    // Continue polling at 60fps
     requestAnimationFrame(pollGamepad);
 }
 
@@ -192,99 +241,68 @@ function handleGamepadInput(gamepad) {
     const selfCells = players[selfId];
     if (!selfCells || selfCells.length === 0) return;
 
-    // Left analog stick for movement
     const leftStickX = gamepad.axes[0];
     const leftStickY = gamepad.axes[1];
 
-    // Apply deadzone
     const leftMagnitude = Math.hypot(leftStickX, leftStickY);
     if (leftMagnitude > gamepadDeadzone) {
-        // Normalize the stick input and remove deadzone
         const normalizedMagnitude = (leftMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
         const normalizedX = (leftStickX / leftMagnitude) * normalizedMagnitude;
         const normalizedY = (leftStickY / leftMagnitude) * normalizedMagnitude;
 
-        // Calculate target position based on stick input
-        const movementScale = 400 / camera.zoom; // Scale movement with zoom
+        const movementScale = 400 / camera.zoom;
         const targetX = camera.x + normalizedX * movementScale;
         const targetY = camera.y + normalizedY * movementScale;
 
-        // Send input to server
         socket.emit('playerInput', { worldMouseX: targetX, worldMouseY: targetY });
 
-        // Update mousePos for other systems that might need it
         mousePos.x = (targetX - camera.x) * camera.zoom + canvas.width / 2;
         mousePos.y = (targetY - camera.y) * camera.zoom + canvas.height / 2;
     }
 
-    // Right analog stick for camera control (optional - could be used for different aiming)
     const rightStickX = gamepad.axes[2];
     const rightStickY = gamepad.axes[3];
     const rightMagnitude = Math.hypot(rightStickX, rightStickY);
 
     if (rightMagnitude > gamepadDeadzone) {
-        // Use right stick for independent aiming (for split/eject direction)
         const normalizedMagnitude = (rightMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
         const normalizedX = (rightStickX / rightMagnitude) * normalizedMagnitude;
         const normalizedY = (rightStickY / rightMagnitude) * normalizedMagnitude;
 
-        // Calculate aim position
         const aimScale = 200 / camera.zoom;
         const aimX = camera.x + normalizedX * aimScale;
         const aimY = camera.y + normalizedY * aimScale;
 
-        // Update mousePos for aiming
         mousePos.x = (aimX - camera.x) * camera.zoom + canvas.width / 2;
         mousePos.y = (aimY - camera.y) * camera.zoom + canvas.height / 2;
     }
 
-    // Button mappings (Xbox 360 standard layout)
     const buttons = {
-        A: 0,      // Split
-        B: 1,      // Eject mass
-        X: 2,      // Reserved
-        Y: 3,      // Toggle chat
-        LB: 4,     // Zoom out
-        RB: 5,     // Zoom in
-        LT: 6,     // Reserved
-        RT: 7,     // Reserved
-        Back: 8,   // Toggle debug
-        Start: 9,  // Open chat
-        LS: 10,    // Left stick click
-        RS: 11,    // Right stick click
-        DPadUp: 12,
-        DPadDown: 13,
-        DPadLeft: 14,
-        DPadRight: 15
+        A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7,
+        Back: 8, Start: 9, LS: 10, RS: 11,
+        DPadUp: 12, DPadDown: 13, DPadLeft: 14, DPadRight: 15
     };
 
-    // Handle button presses (edge detection - only trigger on press, not hold)
     Object.entries(buttons).forEach(([buttonName, buttonIndex]) => {
         if (gamepad.buttons[buttonIndex]) {
             const isPressed = gamepad.buttons[buttonIndex].pressed;
             const wasPressed = gamepadButtonStates[buttonIndex] || false;
 
-            // Button was just pressed (edge detection)
             if (isPressed && !wasPressed) {
                 handleGamepadButton(buttonName, buttonIndex);
             }
 
-            // Update button state
             gamepadButtonStates[buttonIndex] = isPressed;
         }
     });
 
-    // Handle triggers (analog)
     const leftTrigger = gamepad.buttons[6] ? gamepad.buttons[6].value : 0;
     const rightTrigger = gamepad.buttons[7] ? gamepad.buttons[7].value : 0;
 
-    // Use triggers for gradual zoom control
     if (leftTrigger > 0.1) {
-        // Left trigger - zoom out
         customZoomMultiplier = Math.max(0.1, customZoomMultiplier - leftTrigger * 0.02);
     }
     if (rightTrigger > 0.1) {
-        // Right trigger - zoom in
         customZoomMultiplier = Math.min(5.0, customZoomMultiplier + rightTrigger * 0.02);
     }
 }
@@ -300,71 +318,60 @@ function handleGamepadButton(buttonName, buttonIndex) {
 
     switch (buttonName) {
         case 'A':
-            // Split
-            socket.emit('split', { direction });
-            triggerControllerVibration(200, 0.3, 0.3); // Light vibration feedback
+            socket.emit('split', { mouseX: worldMouseX, mouseY: worldMouseY });
+            triggerControllerVibration(200, 0.3, 0.3);
             break;
 
         case 'B':
-            // Eject mass
-            socket.emit('ejectMass', { direction });
-            triggerControllerVibration(150, 0.2, 0.2); // Very light vibration feedback
+            socket.emit('ejectMass', { mouseX: worldMouseX, mouseY: worldMouseY });
+            triggerControllerVibration(150, 0.2, 0.2);
             break;
 
         case 'Y':
-            // Toggle chat
             toggleChat(false);
             break;
 
         case 'Start':
-            // Open chat for typing
             if (isMobileDevice()) {
                 activeInputTarget = chatInput;
                 showMobileKeyboard();
             } else {
-                toggleChat(true); // Open and focus
+                toggleChat(true);
             }
             break;
 
         case 'Back':
-            // Toggle debug mode
             debugMode = !debugMode;
             addSystemMessage(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
             break;
 
         case 'LB':
-            // Zoom out (discrete step)
             customZoomMultiplier = Math.max(0.1, customZoomMultiplier - 0.2);
             addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
             break;
 
         case 'RB':
-            // Zoom in (discrete step)
             customZoomMultiplier = Math.min(5.0, customZoomMultiplier + 0.2);
             addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
             break;
 
         case 'DPadUp':
-            // Increase gamepad sensitivity
             gamepadDeadzone = Math.max(0.05, gamepadDeadzone - 0.05);
             addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
             break;
 
         case 'DPadDown':
-            // Decrease gamepad sensitivity
             gamepadDeadzone = Math.min(0.5, gamepadDeadzone + 0.05);
             addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
             break;
 
         case 'DPadLeft':
-            // Quick mass set to 100
             if (socket && socket.connected) {
                 socket.emit('setMass', { mass: 100 });
             }
             break;
 
         case 'DPadRight':
-            // Quick mass set to 1000
             if (socket && socket.connected) {
                 socket.emit('setMass', { mass: 1000 });
             }
@@ -399,7 +406,6 @@ function setupMobileKeyboard() {
     const keyboardKeysContainer = document.getElementById('keyboard-keys');
     keyboardKeysContainer.innerHTML = '';
 
-    // MODIFIED: Keys are now lowercase
     const keys = [
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
         'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p',
@@ -435,7 +441,7 @@ function setupMobileKeyboard() {
 }
 
 function handleKeyPress(key) {
-    if (!activeInputTarget) return; // Only type if an input is active
+    if (!activeInputTarget) return;
     const currentText = activeInputTarget.value;
     const maxLength = parseInt(activeInputTarget.getAttribute('maxlength')) || 100;
 
@@ -472,7 +478,6 @@ function showMobileKeyboard() {
     if (!activeInputTarget) return;
     mobileKeyboard.classList.add('show');
 
-    // MODIFIED: Change send button text based on target
     const sendButton = document.querySelector('.keyboard-key.send');
     if (sendButton) {
         if (activeInputTarget === nicknameInput) {
@@ -493,7 +498,7 @@ function hideMobileKeyboard() {
     if (isMobileDevice()) {
         chatInput.classList.remove('keyboard-mode');
     }
-    activeInputTarget = null; // Clear the target when keyboard is hidden
+    activeInputTarget = null;
 }
 
 function handleKeyboardConfirm() {
@@ -510,7 +515,6 @@ function handleKeyboardConfirm() {
             chatInput.value = '';
         }
     }
-    // For nickname input, "done" just closes the keyboard.
     hideMobileKeyboard();
 }
 
@@ -529,8 +533,7 @@ playButton.addEventListener('click', () => {
 
     const imageFile = imagePicker.files[0];
     if (imageFile) {
-        // Check file size limit
-        if (imageFile.size > 2 * 1024 * 1024) { // 2MB limit
+        if (imageFile.size > 2 * 1024 * 1024) {
             errorMessage.textContent = 'Image is too large (max 2MB).';
             errorMessage.classList.remove('hidden');
             playButton.disabled = false;
@@ -538,7 +541,6 @@ playButton.addEventListener('click', () => {
             return;
         }
 
-        // Process image with compression for mobile devices
         processImageFile(imageFile)
             .then(processedImageData => {
                 startScreen.style.display = 'none';
@@ -557,7 +559,6 @@ playButton.addEventListener('click', () => {
     }
 });
 
-// Add this new function to handle image processing
 function processImageFile(file) {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -567,13 +568,11 @@ function processImageFile(file) {
 
             img.onload = () => {
                 try {
-                    // Create canvas for image processing
                     const canvas = document.createElement('canvas');
                     const ctx = canvas.getContext('2d');
 
-                    // Determine output size - compress larger images
                     let { width, height } = img;
-                    const maxSize = isMobileDevice() ? 200 : 400; // Smaller max size for mobile
+                    const maxSize = isMobileDevice() ? 200 : 400;
 
                     if (width > maxSize || height > maxSize) {
                         const ratio = Math.min(maxSize / width, maxSize / height);
@@ -584,16 +583,13 @@ function processImageFile(file) {
                     canvas.width = width;
                     canvas.height = height;
 
-                    // Draw and compress the image
                     ctx.drawImage(img, 0, 0, width, height);
 
-                    // Convert to data URL with compression
-                    const quality = isMobileDevice() ? 0.7 : 0.8; // Lower quality for mobile
+                    const quality = isMobileDevice() ? 0.7 : 0.8;
                     const dataUrl = canvas.toDataURL('image/jpeg', quality);
 
-                    // Check final data URL size (base64 encoded)
-                    const sizeInBytes = dataUrl.length * 0.75; // Rough estimate of base64 size
-                    const maxDataUrlSize = isMobileDevice() ? 500 * 1024 : 1024 * 1024; // 500KB mobile, 1MB desktop
+                    const sizeInBytes = dataUrl.length * 0.75;
+                    const maxDataUrlSize = isMobileDevice() ? 500 * 1024 : 1024 * 1024;
 
                     if (sizeInBytes > maxDataUrlSize) {
                         reject(new Error('Processed image is still too large'));
@@ -619,7 +615,6 @@ function processImageFile(file) {
 
 function showStartScreen(score) {
     startScreen.style.display = 'flex';
-    // MODIFIED: Get chat console element locally to avoid race conditions.
     const chatConsoleEl = document.getElementById('chat-console');
     if (chatConsoleEl) chatConsoleEl.classList.add('hidden');
     hideMobileKeyboard();
@@ -662,7 +657,6 @@ function processAndLoadImages(playerData) {
     });
 }
 
-// Update the initializeGame function to add better error handling
 function initializeGame(nickname, color, imageDataUrl) {
     console.log('Initializing game connection...');
     const connectionTimeout = setTimeout(() => {
@@ -674,10 +668,9 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     try {
         socket = io({
-            // Force polling only - no WebSocket
             transports: ['polling'],
             timeout: 5000,
-            maxHttpBufferSize: isMobileDevice() ? 1e6 : 1e7 // 1MB for mobile, 10MB for desktop
+            maxHttpBufferSize: isMobileDevice() ? 1e6 : 1e7
         });
     } catch (error) {
         console.error('Socket creation error:', error);
@@ -693,9 +686,7 @@ function initializeGame(nickname, color, imageDataUrl) {
         selfId = socket.id;
         console.log('Sending joinGame event...');
 
-        // Start ping measurement
         measurePing();
-        // Measure ping every 2 seconds
         setInterval(measurePing, 2000);
 
         try {
@@ -730,7 +721,6 @@ function initializeGame(nickname, color, imageDataUrl) {
         clearTimeout(connectionTimeout);
         showStartScreen();
         if (reason === 'io client disconnect') {
-            // User initiated disconnect, don't show error
             return;
         }
         errorMessage.textContent = 'Lost connection to server.';
@@ -761,7 +751,6 @@ function initializeGame(nickname, color, imageDataUrl) {
         }
         console.log('Game ready!');
         gameReady = true;
-        // MODIFIED: Get chat console element locally to avoid race conditions.
         const chatConsoleEl = document.getElementById('chat-console');
         if (chatConsoleEl) chatConsoleEl.classList.remove('hidden');
 
@@ -809,7 +798,6 @@ function initializeGame(nickname, color, imageDataUrl) {
             }
         }
 
-        // Process images from new cells
         if (updatePackage.newCells.length > 0) {
             updatePackage.newCells.forEach(cell => {
                 if (cell.image && !imageCache[cell.id]) {
@@ -824,7 +812,6 @@ function initializeGame(nickname, color, imageDataUrl) {
             if (!players[updatedCell.id]) continue;
             const cellToUpdate = players[updatedCell.id].find(c => c.cellId === updatedCell.cellId);
             if (cellToUpdate) {
-                // The server sends minimal data, so we only update what's sent
                 cellToUpdate.serverX = updatedCell.x;
                 cellToUpdate.serverY = updatedCell.y;
                 cellToUpdate.radius = updatedCell.radius;
@@ -838,7 +825,6 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     socket.on('youDied', (data) => showStartScreen(data.score));
 
-    // Handle ping response
     socket.on('pong', () => {
         const pingTime = Date.now() - lastPingTime;
         currentPing = pingTime;
@@ -880,20 +866,14 @@ window.addEventListener('keydown', (e) => {
         }
     } else if (e.code === 'KeyC' && e.ctrlKey) {
         e.preventDefault();
-        // MODIFIED: Call toggleChat with 'true' to focus the input on toggle-open.
         toggleChat(true);
     }
 });
 
 // --- Chat & Nickname Event Listeners ---
 document.addEventListener('DOMContentLoaded', () => {
-    // Set up chat toggle (this will run again but that's okay)
     setupChatToggle();
-
-    // Initialize gamepad support
     setupGamepadSupport();
-
-    // NEW: Load performance settings and set up listeners
     loadSettings();
     setupSettingsListeners();
 
@@ -903,7 +883,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
-// MODIFIED: Handle both chat and nickname inputs
 chatInput.addEventListener('click', (e) => {
     if (isMobileDevice()) { e.preventDefault(); activeInputTarget = chatInput; showMobileKeyboard(); }
 });
@@ -949,7 +928,6 @@ function handleChatCommand(command) {
                 addSystemMessage('Maximum mass is 1000000');
                 return true;
             }
-            // Send mass change request to server
             socket.emit('setMass', { mass: massValue });
             addSystemMessage(`Setting mass to ${massValue}...`);
             return true;
@@ -980,12 +958,17 @@ function handleChatCommand(command) {
             }
             return true;
 
+        case '/fps':
+            addSystemMessage(`Current FPS: ${fps}, Frame time: ${frameTimeAccumulator.toFixed(1)}ms`);
+            return true;
+
         case '/help':
             addSystemMessage('Available commands:');
             addSystemMessage('/debug - Toggle debug information display');
             addSystemMessage('/mass <number> - Set your mass (1-1000000)');
             addSystemMessage('/zoom <number> - Set zoom multiplier (0.1-10)');
             addSystemMessage('/controller - Show controller status and controls');
+            addSystemMessage('/fps - Show current frame rate');
             addSystemMessage('/help - Show this help message');
             addSystemMessage('');
             addSystemMessage('Game controls:');
@@ -1002,7 +985,7 @@ function handleChatCommand(command) {
     }
 }
 
-// --- Touch Controls (MODIFIED) ---
+// --- Touch Controls ---
 let joystick = {
     startX: 0,
     startY: 0,
@@ -1011,18 +994,16 @@ let joystick = {
     baseRadius: 60,
     stickRadius: 40,
     active: false,
-    id: null // To track the specific touch for the joystick
+    id: null
 };
 
 let splitButton = { x: 0, y: 0, radius: 40, active: false };
 let ejectButton = { x: 0, y: 0, radius: 40, active: false };
 
 function setupTouchControls() {
-    // Get current CSS dimensions for positioning
     const cssWidth = parseInt(canvas.style.width);
     const cssHeight = parseInt(canvas.style.height);
 
-    // Initial button positions (will be updated on resize)
     splitButton.x = cssWidth - splitButton.radius - 20;
     splitButton.y = cssHeight - splitButton.radius - 20;
 
@@ -1038,26 +1019,24 @@ function setupTouchControls() {
 
     canvas.addEventListener('touchstart', (e) => {
         if (!gameReady) return;
-        e.preventDefault(); // Prevent default touch behavior (scrolling, zooming)
+        e.preventDefault();
 
         for (let i = 0; i < e.changedTouches.length; i++) {
             const touch = e.changedTouches[i];
 
-            // Check for button presses first
             if (Math.hypot(touch.clientX - splitButton.x, touch.clientY - splitButton.y) < splitButton.radius) {
                 splitButton.active = true;
                 handleSplitOrEject('split');
                 console.log('Split button touched');
-                return; // Consume the touch for the button
+                return;
             }
             if (Math.hypot(touch.clientX - ejectButton.x, touch.clientY - ejectButton.y) < ejectButton.radius) {
                 ejectButton.active = true;
                 handleSplitOrEject('ejectMass');
                 console.log('Eject button touched');
-                return; // Consume the touch for the button
+                return;
             }
 
-            // If no button was pressed, activate joystick for the first touch that isn't already handled
             if (!joystick.active) {
                 joystick.startX = touch.clientX;
                 joystick.startY = touch.clientY;
@@ -1089,7 +1068,6 @@ function setupTouchControls() {
             if (touch.identifier === joystick.id) {
                 joystick.active = false;
                 joystick.id = null;
-                // When joystick is released, reset mousePos to current player position
                 const selfCells = players[selfId];
                 if (selfCells && selfCells.length > 0) {
                     mousePos.x = selfCells[0].x;
@@ -1107,23 +1085,20 @@ function setupTouchControls() {
 
         let worldMouseX, worldMouseY;
 
-        // MODIFIED: Calculate target position based on current joystick state
         if (joystick.active) {
             const stickOffsetX = joystick.currentX - joystick.startX;
             const stickOffsetY = joystick.currentY - joystick.startY;
             const stickDistance = Math.hypot(stickOffsetX, stickOffsetY);
 
-            if (stickDistance > 10) { // Same dead zone as movement
+            if (stickDistance > 10) {
                 const maxStickDistance = joystick.baseRadius;
                 const normalizedStickX = stickOffsetX / maxStickDistance;
                 const normalizedStickY = stickOffsetY / maxStickDistance;
 
-                // Use same scale as movement for consistency
                 const effectiveMovementScale = 300 / camera.zoom;
                 worldMouseX = camera.x + normalizedStickX * effectiveMovementScale;
                 worldMouseY = camera.y + normalizedStickY * effectiveMovementScale;
             } else {
-                // Joystick not moved enough, use player center as fallback
                 let totalMass = 0;
                 let playerCenterX = 0;
                 let playerCenterY = 0;
@@ -1137,12 +1112,10 @@ function setupTouchControls() {
                     playerCenterX /= totalMass;
                     playerCenterY /= totalMass;
                 }
-                // Split upward as default
                 worldMouseX = playerCenterX;
                 worldMouseY = playerCenterY - 100;
             }
         } else {
-            // Joystick not active, use current mousePos (shouldn't happen on mobile but good fallback)
             worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
             worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
         }
@@ -1151,14 +1124,35 @@ function setupTouchControls() {
     }
 }
 
+// OPTIMIZATION: Frame rate limiting
+let lastRenderTime = 0;
 
 // --- Game Loop ---
-function gameLoop() {
-    // Get CSS pixel dimensions for UI positioning
+function gameLoop(currentTime) {
+    // Calculate delta time
+    const deltaTime = currentTime - lastFrameTime;
+    lastFrameTime = currentTime;
+
+    // Update FPS counter
+    frameCount++;
+    if (currentTime - lastFpsUpdate > 1000) {
+        fps = frameCount;
+        frameTimeAccumulator = deltaTime;
+        frameCount = 0;
+        lastFpsUpdate = currentTime;
+    }
+
+    // Frame rate limiting
+    const frameDelay = 1000 / settings.frameRateLimit;
+    if (currentTime - lastRenderTime < frameDelay) {
+        requestAnimationFrame(gameLoop);
+        return;
+    }
+    lastRenderTime = currentTime;
+
     const cssWidth = parseInt(canvas.style.width) || window.innerWidth;
     const cssHeight = parseInt(canvas.style.height) || window.innerHeight;
 
-    // Basic guard to wait for the server connection
     if (!gameReady) {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.font = '30px Arial'; ctx.fillStyle = 'white'; ctx.textAlign = 'center';
@@ -1170,50 +1164,41 @@ function gameLoop() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     const selfCells = players[selfId];
     if (selfCells && selfCells.length > 0) {
-        // --- Player Input and Prediction ---
+        // Player Input and Prediction
         let targetX = mousePos.x;
         let targetY = mousePos.y;
-        let shouldSendInput = true; // Flag to control when to send input to server
+        let shouldSendInput = true;
 
         if (isMobileDevice() && joystick.active && !gamepadConnected) {
             const stickOffsetX = joystick.currentX - joystick.startX;
             const stickOffsetY = joystick.currentY - joystick.startY;
             const stickDistance = Math.hypot(stickOffsetX, stickOffsetY);
 
-            // Only send input if joystick is moved significantly
-            if (stickDistance > 10) { // Dead zone for joystick
+            if (stickDistance > 10) {
                 const maxStickDistance = joystick.baseRadius;
                 const normalizedStickX = stickOffsetX / maxStickDistance;
                 const normalizedStickY = stickOffsetY / maxStickDistance;
 
-                // Scale target movement relative to camera, zoom, and player size
-                const effectiveMovementScale = 300 / camera.zoom; // Adjust for zoom
+                const effectiveMovementScale = 300 / camera.zoom;
                 targetX = camera.x + normalizedStickX * effectiveMovementScale;
                 targetY = camera.y + normalizedStickY * effectiveMovementScale;
             } else {
-                // Joystick is active but not moved enough - don't send input
                 shouldSendInput = false;
             }
 
         } else if (!isMobileDevice() && !gamepadConnected) {
-            // For desktop without gamepad, mousePos is already relative to the canvas viewport, convert to world coordinates
-            // Account for zoom when converting mouse coordinates
             targetX = (mousePos.x - cssWidth / 2) / camera.zoom + camera.x;
             targetY = (mousePos.y - cssHeight / 2) / camera.zoom + camera.y;
         } else if (!gamepadConnected) {
-            // Mobile device but joystick is not active and no gamepad - don't send any input
             shouldSendInput = false;
         }
-        // Note: If gamepad is connected, input is handled in handleGamepadInput()
 
-        // Only send player input when we actually want the player to move (and gamepad isn't handling it)
         if (shouldSendInput && !gamepadConnected) {
             socket.emit('playerInput', { worldMouseX: targetX, worldMouseY: targetY });
         }
 
-        // Very light client-side prediction for immediate responsiveness
         if (shouldSendInput && !gamepadConnected) {
-            const speed = 1; // Very reduced prediction speed
+            const speed = 1;
             selfCells.forEach(currentCell => {
                 const dirX = targetX - currentCell.x;
                 const dirY = targetY - currentCell.y;
@@ -1232,11 +1217,11 @@ function gameLoop() {
             });
         }
 
-        // --- Position Interpolation for Smooth Movement ---
+        // Position Interpolation
         const allCells = Object.values(players).flat();
         allCells.forEach(cell => {
             if (cell.serverX !== undefined && cell.serverY !== undefined) {
-                const lerpSpeed = 0.25; // Slightly slower for smoother movement
+                const lerpSpeed = 0.25;
                 const distanceToServer = Math.hypot(cell.serverX - cell.x, cell.serverY - cell.y);
 
                 cell.x += (cell.serverX - cell.x) * lerpSpeed;
@@ -1249,7 +1234,7 @@ function gameLoop() {
             }
         });
 
-        // --- Camera Logic with Dynamic Zoom ---
+        // Camera Logic
         let totalMass = 0; let playerCenterX = 0;
         let playerCenterY = 0; let largestRadius = 0;
         selfCells.forEach(cell => {
@@ -1280,20 +1265,21 @@ function gameLoop() {
         }
     }
 
-    // --- World and Object Rendering (ALWAYS RUNS) ---
+    // World and Object Rendering
     ctx.save();
     ctx.translate(cssWidth / 2, cssHeight / 2);
     ctx.scale(camera.zoom, camera.zoom);
     ctx.translate(-camera.x, -camera.y);
 
-    // OPTIMIZATION: Calculate camera view bounds for culling
+    // OPTIMIZATION: Calculate camera view bounds with render distance
     const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
     const viewWidth = (cssWidth * dpr) / camera.zoom;
     const viewHeight = (cssHeight * dpr) / camera.zoom;
-    const viewLeft = camera.x - viewWidth / 2 - 50; // Add buffer
-    const viewRight = camera.x + viewWidth / 2 + 50;
-    const viewTop = camera.y - viewHeight / 2 - 50;
-    const viewBottom = camera.y + viewHeight / 2 + 50;
+    const renderDistance = settings.renderDistance / camera.zoom;
+    const viewLeft = camera.x - renderDistance;
+    const viewRight = camera.x + renderDistance;
+    const viewTop = camera.y - renderDistance;
+    const viewBottom = camera.y + renderDistance;
 
     drawGrid(viewLeft, viewRight, viewTop, viewBottom);
     ctx.strokeStyle = '#E0E0E0'; ctx.lineWidth = 15;
@@ -1301,22 +1287,26 @@ function gameLoop() {
 
     const allSortedCells = Object.values(players).flat().sort((a, b) => a.radius - b.radius);
     allSortedCells.forEach(cell => {
-        // OPTIMIZATION: View frustum culling
+        // OPTIMIZATION: View frustum culling with render distance
         if (cell.x + cell.radius < viewLeft ||
             cell.x - cell.radius > viewRight ||
             cell.y + cell.radius < viewTop ||
             cell.y - cell.radius > viewBottom) {
-            return; // Don't draw if off-screen
+            return;
         }
 
         if (cell.animationOffset === undefined) { cell.animationOffset = Math.random() * 2 * Math.PI; }
-        drawSquishyCell(ctx, cell, [], world);
 
-        // OPTIMIZATION: Check setting before drawing nicknames
+        // OPTIMIZATION: Use simple or complex rendering based on settings
+        if (settings.smoothCells) {
+            drawSquishyCell(ctx, cell, [], world);
+        } else {
+            drawSimpleCell(ctx, cell);
+        }
+
         if (settings.showNicknames && cell.id !== DUD_PLAYER_ID && cell.nickname) {
             const fontSize = Math.max(10, cell.radius * 0.3);
             const onscreenRadius = cell.radius * camera.zoom;
-            // Don't draw tiny text
             if (onscreenRadius > 10) {
                 ctx.fillStyle = 'white';
                 ctx.font = `bold ${fontSize}px Arial`;
@@ -1331,7 +1321,7 @@ function gameLoop() {
     });
     ctx.restore();
 
-    // --- UI Rendering ---
+    // UI Rendering
     drawLeaderboard(cssWidth, cssHeight);
     if (selfCells && selfCells.length > 0) {
         drawMinimap(selfCells, cssWidth, cssHeight);
@@ -1353,14 +1343,13 @@ function gameLoop() {
     const coordsText = `X: ${Math.round(camera.x)}, Y: ${Math.round(camera.y)}`;
     ctx.fillText(coordsText, minimapCenterX, minimapTopY - 10);
 
-    // Draw ping and controller status in bottom left corner
+    // Draw ping and controller status
     ctx.font = '8pt Arial';
     ctx.fillStyle = currentPing > 100 ? '#ff6666' : currentPing > 50 ? '#ffaa00' : '#66ff66';
     ctx.textAlign = 'left';
-    const pingText = `Ping: ${currentPing}ms`;
+    const pingText = `Ping: ${currentPing}ms | FPS: ${fps}`;
     ctx.fillText(pingText, 10, cssHeight - 30);
 
-    // Show controller status
     if (gamepadConnected) {
         ctx.fillStyle = '#66ff66';
         ctx.fillText('Xbox Controller: Connected', 10, cssHeight - 10);
@@ -1378,12 +1367,12 @@ function drawDebugUI(cssHeight) {
 
     const selfCells = players[selfId];
     const debugX = 20;
-    const debugY = cssHeight - 400; // Increased height for controller info
+    const debugY = cssHeight - 450;
     const lineHeight = 20;
     const now = Date.now();
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-    const debugHeight = (selfCells.length + 7) * lineHeight + 10; // More lines for controller info
+    const debugHeight = (selfCells.length + 9) * lineHeight + 10;
     ctx.fillRect(debugX - 5, debugY - 5, 350, debugHeight);
 
     ctx.font = 'bold 16px Arial';
@@ -1413,7 +1402,6 @@ function drawDebugUI(cssHeight) {
     ctx.fillStyle = '#ffaa00';
     ctx.fillText(`Zoom Multiplier: ${customZoomMultiplier.toFixed(2)}x`, debugX, debugY + (selfCells.length + 4) * lineHeight);
 
-    // Controller debug info
     ctx.fillStyle = gamepadConnected ? '#66ff66' : '#ff6666';
     ctx.fillText(`Controller: ${gamepadConnected ? 'Connected' : 'Disconnected'}`, debugX, debugY + (selfCells.length + 5) * lineHeight);
 
@@ -1421,11 +1409,15 @@ function drawDebugUI(cssHeight) {
         ctx.fillStyle = '#00aaff';
         ctx.fillText(`Deadzone: ${gamepadDeadzone.toFixed(2)} | Vibration: ${gamepadVibrationSupported ? 'Yes' : 'No'}`, debugX, debugY + (selfCells.length + 6) * lineHeight);
     }
+
+    // Performance stats
+    ctx.fillStyle = '#ffaa00';
+    ctx.fillText(`Frame time: ${frameTimeAccumulator.toFixed(1)}ms | Frame limit: ${settings.frameRateLimit}fps`, debugX, debugY + (selfCells.length + 7) * lineHeight);
+    ctx.fillText(`Render distance: ${settings.renderDistance}px`, debugX, debugY + (selfCells.length + 8) * lineHeight);
 }
 
 // --- Initial Setup & Helper Functions ---
 function resizeCanvas() {
-    // OPTIMIZATION: Use setting to control resolution
     const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
     const displayWidth = window.innerWidth;
     const displayHeight = window.innerHeight;
@@ -1436,7 +1428,6 @@ function resizeCanvas() {
     canvas.width = displayWidth * dpr;
     canvas.height = displayHeight * dpr;
 
-    // We scale the context by DPR, so we can use CSS pixels for drawing
     ctx.scale(dpr, dpr);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = settings.highQualityGraphics ? 'high' : 'low';
@@ -1455,7 +1446,6 @@ function resizeCanvas() {
 }
 window.addEventListener('resize', resizeCanvas);
 
-
 customZoomMultiplier = isMobileDevice() ? 0.25 : 1.0;
 
 if (isMobileDevice()) {
@@ -1471,9 +1461,7 @@ if (isMobileDevice()) {
     }
 }
 
-// Initialize gamepad support
 setupGamepadSupport();
-// Initial load of settings and canvas size
 loadSettings();
 resizeCanvas();
 
@@ -1484,7 +1472,6 @@ function drawGrid(viewLeft, viewRight, viewTop, viewBottom) {
     ctx.strokeStyle = '#333';
     ctx.lineWidth = 1;
 
-    // OPTIMIZATION: Only draw visible grid lines
     const startX = Math.floor(viewLeft / gridSize) * gridSize;
     const endX = Math.ceil(viewRight / gridSize) * gridSize;
     const startY = Math.floor(viewTop / gridSize) * gridSize;
@@ -1504,22 +1491,38 @@ function drawGrid(viewLeft, viewRight, viewTop, viewBottom) {
     }
 }
 
+// OPTIMIZATION: Simple cell rendering for performance mode
+function drawSimpleCell(ctx, cell) {
+    const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
+
+    ctx.beginPath();
+    ctx.arc(cell.x, cell.y, cell.radius, 0, 2 * Math.PI);
+
+    if (img && img.complete && img.naturalHeight !== 0) {
+        ctx.save();
+        ctx.clip();
+        ctx.drawImage(img, cell.x - cell.radius, cell.y - cell.radius, cell.radius * 2, cell.radius * 2);
+        ctx.restore();
+    } else {
+        ctx.fillStyle = cell.color;
+        ctx.fill();
+    }
+
+    // Draw border for player cells
+    if (cell.type === 'player' && cell.mergeCooldown) {
+        const onCooldown = cell.mergeCooldown > Date.now();
+        ctx.strokeStyle = onCooldown ? 'rgba(255, 50, 50, 0.9)' : 'rgba(50, 255, 50, 0.9)';
+        ctx.lineWidth = Math.min(8, Math.max(1, cell.radius * 0.05));
+        ctx.stroke();
+    }
+}
+
 function drawSquishyCell(ctx, cell, siblings, world) {
-    // Destructure 'type' to identify viruses
     const { x, y, radius, color, animationOffset, type } = cell;
     const onscreenRadius = radius * camera.zoom;
 
-    // OPTIMIZATION: Level of Detail (LOD) - Draw simple circle for small/distant cells
     if (!settings.highQualityGraphics && onscreenRadius < 4) {
-        const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
-        if (img && img.complete && img.naturalHeight !== 0) {
-            ctx.drawImage(img, x - radius, y - radius, radius * 2, radius * 2);
-        } else {
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, 2 * Math.PI);
-            ctx.fill();
-        }
+        drawSimpleCell(ctx, cell);
         return;
     }
 
@@ -1572,12 +1575,10 @@ function drawSquishyCell(ctx, cell, siblings, world) {
     }
     ctx.closePath();
 
-    // Fill the cell body with color or image
-    // OPTIMIZATION: Check setting before trying to draw image
     const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
     if (img && img.complete && img.naturalHeight !== 0) {
         ctx.save();
-        ctx.clip(); // Use the squishy path as a clipping mask
+        ctx.clip();
         ctx.drawImage(img, x - radius, y - radius, radius * 2, radius * 2);
         ctx.restore();
     } else {
@@ -1585,7 +1586,6 @@ function drawSquishyCell(ctx, cell, siblings, world) {
         ctx.fill();
     }
 
-    // For player cells, draw a border indicating merge cooldown status.
     if (cell.type === 'player' && cell.mergeCooldown) {
         const onCooldown = cell.mergeCooldown > Date.now();
         ctx.strokeStyle = onCooldown ? 'rgba(255, 50, 50, 0.9)' : 'rgba(50, 255, 50, 0.9)';
@@ -1611,7 +1611,6 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     ctx.strokeStyle = '#E0E0E0'; ctx.lineWidth = 2;
     ctx.strokeRect(mapX, mapY, currentMinimapSize, currentMinimapSize);
 
-    // --- Draw camera view on minimap ---
     const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
     const viewWidth = (cssWidth * dpr) / camera.zoom;
     const viewHeight = (cssHeight * dpr) / camera.zoom;
@@ -1622,16 +1621,14 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     const minimapViewWidth = (viewWidth / world.width) * currentMinimapSize;
     const minimapViewHeight = (viewHeight / world.height) * currentMinimapSize;
 
-    ctx.strokeStyle = '#ff0000'; // Bright red
+    ctx.strokeStyle = '#ff0000';
     ctx.lineWidth = 1;
     ctx.strokeRect(minimapViewX, minimapViewY, minimapViewWidth, minimapViewHeight);
-    // --- End camera view on minimap ---
 
     if (!playerCells) return;
     playerCells.forEach(cell => {
         const playerMapX = mapX + ((cell.x + world.width / 2) / world.width) * currentMinimapSize;
         const playerMapY = mapY + ((cell.y + world.height / 2) / world.height) * currentMinimapSize;
-        // OPTIMIZATION: Check setting before drawing image on minimap
         const img = settings.showImages ? imageCache[cell.id] : null;
         if (img && img.complete && img.naturalHeight !== 0) {
             ctx.drawImage(img, playerMapX - MINIMAP_DOT_SIZE, playerMapY - MINIMAP_DOT_SIZE, MINIMAP_DOT_SIZE * 2, MINIMAP_DOT_SIZE * 2);
@@ -1642,35 +1639,64 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     });
 }
 
+// OPTIMIZATION: Cache leaderboard rendering
 function drawLeaderboard(cssWidth, cssHeight) {
-    const leaderboardX = cssWidth - 220; const leaderboardY = 20;
-    let entryHeight = 25; let titleHeight = 30; let maxEntries = 5;
-    let titleFontSize = 20; let entryFontSize = 16;
-    if (isMobileDevice()) {
-        const maxLeaderboardHeight = cssHeight * 0.4; titleHeight = 20; entryHeight = 16;
-        titleFontSize = 14; entryFontSize = 11;
-        const availableHeight = maxLeaderboardHeight - titleHeight;
-        maxEntries = Math.min(Math.floor(availableHeight / entryHeight), 5);
-        if (titleHeight + (maxEntries * entryHeight) > maxLeaderboardHeight) {
-            entryHeight = 14; titleHeight = 18; titleFontSize = 12; entryFontSize = 10;
-            const newAvailableHeight = maxLeaderboardHeight - titleHeight;
-            maxEntries = Math.min(Math.floor(newAvailableHeight / entryHeight), 5);
+    const currentTime = Date.now();
+
+    // Check if we should update the cache
+    if (!leaderboardCache || currentTime - leaderboardCacheTime > LEADERBOARD_CACHE_DURATION) {
+        // Create off-screen canvas for caching
+        const offscreenCanvas = document.createElement('canvas');
+        const offscreenCtx = offscreenCanvas.getContext('2d');
+
+        const leaderboardX = cssWidth - 220; const leaderboardY = 20;
+        let entryHeight = 25; let titleHeight = 30; let maxEntries = 5;
+        let titleFontSize = 20; let entryFontSize = 16;
+        if (isMobileDevice()) {
+            const maxLeaderboardHeight = cssHeight * 0.4; titleHeight = 20; entryHeight = 16;
+            titleFontSize = 14; entryFontSize = 11;
+            const availableHeight = maxLeaderboardHeight - titleHeight;
+            maxEntries = Math.min(Math.floor(availableHeight / entryHeight), 5);
+            if (titleHeight + (maxEntries * entryHeight) > maxLeaderboardHeight) {
+                entryHeight = 14; titleHeight = 18; titleFontSize = 12; entryFontSize = 10;
+                const newAvailableHeight = maxLeaderboardHeight - titleHeight;
+                maxEntries = Math.min(Math.floor(newAvailableHeight / entryHeight), 5);
+            }
         }
+
+        const playerScores = Object.entries(players).filter(([id, _]) => id !== DUD_PLAYER_ID && players[id].length > 0).map(([id, cells]) => ({ id: id, nickname: cells[0]?.nickname || '...', score: Math.max(1, Math.round(cells.reduce((sum, cell) => sum + (cell.score || 0), 0))) }));
+        const sortedPlayers = playerScores.sort((a, b) => b.score - a.score);
+        const displayCount = Math.min(sortedPlayers.length, maxEntries);
+
+        // Set canvas size
+        offscreenCanvas.width = 200;
+        offscreenCanvas.height = titleHeight + (displayCount * entryHeight);
+
+        // Draw leaderboard on off-screen canvas
+        offscreenCtx.fillStyle = 'rgba(100, 100, 100, 0.7)';
+        offscreenCtx.fillRect(0, 0, 200, offscreenCanvas.height);
+        offscreenCtx.font = `bold ${titleFontSize}px Arial`; offscreenCtx.fillStyle = 'white'; offscreenCtx.textAlign = 'center';
+        offscreenCtx.fillText('Leaderboard', 100, Math.round(titleHeight * 0.7));
+
+        for (let i = 0; i < displayCount; i++) {
+            const player = sortedPlayers[i]; const rank = i + 1;
+            offscreenCtx.fillStyle = (player.id === selfId) ? '#f1c40f' : 'white';
+            offscreenCtx.font = `${entryFontSize}px Arial`; offscreenCtx.textAlign = 'left';
+            offscreenCtx.fillText(`${rank}. ${player.nickname}`, 10, titleHeight + (i * entryHeight) + Math.round(entryHeight * 0.6));
+            offscreenCtx.textAlign = 'right';
+            offscreenCtx.fillText(player.score, 190, titleHeight + (i * entryHeight) + Math.round(entryHeight * 0.6));
+        }
+
+        // Cache the result
+        leaderboardCache = offscreenCanvas;
+        leaderboardCacheTime = currentTime;
     }
-    const playerScores = Object.entries(players).filter(([id, _]) => id !== DUD_PLAYER_ID && players[id].length > 0).map(([id, cells]) => ({ id: id, nickname: cells[0]?.nickname || '...', score: Math.max(1, Math.round(cells.reduce((sum, cell) => sum + (cell.score || 0), 0))) }));
-    const sortedPlayers = playerScores.sort((a, b) => b.score - a.score);
-    const displayCount = Math.min(sortedPlayers.length, maxEntries);
-    ctx.fillStyle = 'rgba(100, 100, 100, 0.7)';
-    ctx.fillRect(leaderboardX, leaderboardY, 200, titleHeight + (displayCount * entryHeight));
-    ctx.font = `bold ${titleFontSize}px Arial`; ctx.fillStyle = 'white'; ctx.textAlign = 'center';
-    ctx.fillText('Leaderboard', leaderboardX + 100, leaderboardY + Math.round(titleHeight * 0.7));
-    for (let i = 0; i < displayCount; i++) {
-        const player = sortedPlayers[i]; const rank = i + 1;
-        ctx.fillStyle = (player.id === selfId) ? '#f1c40f' : 'white';
-        ctx.font = `${entryFontSize}px Arial`; ctx.textAlign = 'left';
-        ctx.fillText(`${rank}. ${player.nickname}`, leaderboardX + 10, leaderboardY + titleHeight + (i * entryHeight) + Math.round(entryHeight * 0.6));
-        ctx.textAlign = 'right';
-        ctx.fillText(player.score, leaderboardX + 190, leaderboardY + titleHeight + (i * entryHeight) + Math.round(entryHeight * 0.6));
+
+    // Draw cached leaderboard
+    if (leaderboardCache) {
+        const leaderboardX = cssWidth - 220;
+        const leaderboardY = 20;
+        ctx.drawImage(leaderboardCache, leaderboardX, leaderboardY);
     }
 }
 
@@ -1726,8 +1752,6 @@ function toggleChat(shouldFocus = false) {
         chatConsoleEl.style.height = isNowCollapsed ? '26px' : '104px';
     }
 
-    // If we just opened the chat (it was collapsed, but isn't now),
-    // and we were asked to focus, and we are not on mobile, then focus the input.
     if (wasCollapsed && !isNowCollapsed && shouldFocus && !isMobileDevice()) {
         if (chatInputEl) {
             chatInputEl.focus();
@@ -1741,10 +1765,8 @@ window.toggleChat = toggleChat;
 function setupChatToggle() {
     const chatToggleBtn = document.getElementById('chat-toggle');
     if (chatToggleBtn) {
-        // Remove any existing event listeners first
         chatToggleBtn.onclick = null;
 
-        // Add the click event listener
         chatToggleBtn.addEventListener('click', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -1760,14 +1782,11 @@ function setupChatToggle() {
     }
 }
 
-// Try to set up the chat toggle immediately
 setupChatToggle();
 
-// Also try when DOM is loaded (if it hasn't loaded yet)
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', setupChatToggle);
 } else {
-    // DOM is already loaded, try again in case elements were added later
     setTimeout(setupChatToggle, 100);
 }
 
@@ -1801,7 +1820,6 @@ function addSystemMessage(message) {
 function isMobileDevice() { return (typeof window.orientation !== "undefined") || (navigator.userAgent.indexOf('IEMobile') !== -1); }
 
 function forceMobileChatSize() {
-    // MODIFIED: Get chat console element locally to avoid race conditions.
     const chatConsoleEl = document.getElementById('chat-console');
     if (chatConsoleEl) {
         chatConsoleEl.style.width = '160px';
@@ -1818,7 +1836,6 @@ function forceMobileChatSize() {
     const chatMessages = document.getElementById('chat-messages');
     if (chatMessages) { chatMessages.style.fontSize = '8px'; chatMessages.style.maxHeight = '64px'; chatMessages.style.padding = '3px'; chatMessages.style.lineHeight = '1.2'; }
 
-    // MODIFIED: Target both inputs for mobile readonly setup
     [chatInput, nicknameInput].forEach(input => {
         if (input) {
             input.setAttribute('readonly', 'true');
@@ -1845,7 +1862,7 @@ function forceMobileChatSize() {
         chatConsoleEl.style.height = '26px';
     }
 }
-// --- Ping Measurement Function ---
+
 function measurePing() {
     if (socket && socket.connected) {
         lastPingTime = Date.now();
