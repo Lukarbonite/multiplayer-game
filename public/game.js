@@ -317,7 +317,8 @@ function handleGamepadInput(gamepad) {
     const rightTrigger = gamepad.buttons[7] ? gamepad.buttons[7].value : 0;
 
     if (leftTrigger > 0.1) {
-        customZoomMultiplier = Math.max(0.1, customZoomMultiplier - leftTrigger * 0.02);
+        // Prevent zooming out past the default 1.0x multiplier
+        customZoomMultiplier = Math.max(1.0, customZoomMultiplier - leftTrigger * 0.02);
     }
     if (rightTrigger > 0.1) {
         customZoomMultiplier = Math.min(5.0, customZoomMultiplier + rightTrigger * 0.02);
@@ -363,7 +364,8 @@ function handleGamepadButton(buttonName, buttonIndex) {
             break;
 
         case 'LB':
-            customZoomMultiplier = Math.max(0.1, customZoomMultiplier - 0.2);
+            // Prevent zooming out past the default 1.0x multiplier
+            customZoomMultiplier = Math.max(1.0, customZoomMultiplier - 0.2);
             addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
             break;
 
