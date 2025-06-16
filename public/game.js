@@ -24,6 +24,7 @@ let frameTimeAccumulator = 0;
 // Render caching
 let leaderboardCache = null;
 let leaderboardCacheTime = 0;
+let leaderboardData = [];
 const LEADERBOARD_CACHE_DURATION = 500; // Update leaderboard every 500ms
 
 // Performance Settings
@@ -754,7 +755,6 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     socket.on('disconnect', (reason) => {
         console.log('Disconnected:', reason);
-        // Client-side score saving logic is now gone.
 
         clearTimeout(connectionTimeout);
         showStartScreen();
@@ -868,6 +868,12 @@ function initializeGame(nickname, color, imageDataUrl) {
     socket.on('pong', () => {
         const pingTime = Date.now() - lastPingTime;
         currentPing = pingTime;
+    });
+
+    socket.on('leaderboardUpdate', (data) => {
+        leaderboardData = data;
+        // Invalidate the cache so it gets redrawn with the new data
+        leaderboardCache = null;
     });
 }
 
@@ -1696,15 +1702,12 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
 
 // Cache leaderboard rendering
 function drawLeaderboard(cssWidth, cssHeight) {
-    const currentTime = Date.now();
-
-    // Check if we should update the cache
-    if (!leaderboardCache || currentTime - leaderboardCacheTime > LEADERBOARD_CACHE_DURATION) {
+    // If the cache is invalid, regenerate it using the server-provided data.
+    if (!leaderboardCache) {
         // Create off-screen canvas for caching
         const offscreenCanvas = document.createElement('canvas');
         const offscreenCtx = offscreenCanvas.getContext('2d');
 
-        const leaderboardX = cssWidth - 220; const leaderboardY = 20;
         let entryHeight = 25; let titleHeight = 30; let maxEntries = 5;
         let titleFontSize = 20; let entryFontSize = 16;
         if (isMobileDevice()) {
@@ -1719,9 +1722,8 @@ function drawLeaderboard(cssWidth, cssHeight) {
             }
         }
 
-        const playerScores = Object.entries(players).filter(([id, _]) => id !== DUD_PLAYER_ID && players[id].length > 0).map(([id, cells]) => ({ id: id, nickname: cells[0]?.nickname || '...', score: Math.max(1, Math.round(cells.reduce((sum, cell) => sum + (cell.score || 0), 0))) }));
-        const sortedPlayers = playerScores.sort((a, b) => b.score - a.score);
-        const displayCount = Math.min(sortedPlayers.length, maxEntries);
+        // Use leaderboardData from the server, which is already sorted.
+        const displayCount = Math.min(leaderboardData.length, maxEntries);
 
         // Set canvas size
         offscreenCanvas.width = 200;
@@ -1734,7 +1736,8 @@ function drawLeaderboard(cssWidth, cssHeight) {
         offscreenCtx.fillText('Leaderboard', 100, Math.round(titleHeight * 0.7));
 
         for (let i = 0; i < displayCount; i++) {
-            const player = sortedPlayers[i]; const rank = i + 1;
+            const player = leaderboardData[i];
+            const rank = i + 1;
             offscreenCtx.fillStyle = (player.id === selfId) ? '#f1c40f' : 'white';
             offscreenCtx.font = `${entryFontSize}px Arial`; offscreenCtx.textAlign = 'left';
             offscreenCtx.fillText(`${rank}. ${player.nickname}`, 10, titleHeight + (i * entryHeight) + Math.round(entryHeight * 0.6));
@@ -1744,7 +1747,6 @@ function drawLeaderboard(cssWidth, cssHeight) {
 
         // Cache the result
         leaderboardCache = offscreenCanvas;
-        leaderboardCacheTime = currentTime;
     }
 
     // Draw cached leaderboard

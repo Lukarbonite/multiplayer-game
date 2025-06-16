@@ -1103,6 +1103,28 @@ setInterval(() => {
     }
 }, 1000 / NETWORK_UPDATE_RATE);
 
+// Leaderboard update loop
+setInterval(() => {
+    if (Object.keys(players).length === 0) return;
+
+    // Calculate leaderboard from all players
+    const playerScores = Object.entries(players)
+        .filter(([id, pCells]) => id !== DUD_PLAYER_ID && pCells.length > 0)
+        .map(([id, pCells]) => {
+            return {
+                id: id,
+                nickname: pCells[0]?.nickname || '...',
+                score: Math.max(1, Math.round(pCells.reduce((sum, cell) => sum + (cell.score || 0), 0)))
+            };
+        });
+
+    // Sort and take top 5, since that's what the client shows
+    const topPlayers = playerScores.sort((a, b) => b.score - a.score).slice(0, 5);
+
+    // Broadcast the new leaderboard data to all clients
+    io.emit('leaderboardUpdate', topPlayers);
+}, 1000); // Update every second
+
 server.listen(PORT, () => {
     console.log(`🚀 Server listening on port ${PORT}`);
 });
