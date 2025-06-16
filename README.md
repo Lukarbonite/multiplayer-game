@@ -1,6 +1,3 @@
-Of course. After reviewing your codebase, I've updated the README to reflect all the new features, performance optimizations, and control schemes you've implemented. Here is the updated `README.txt`:
-
----
 # 🎮 Multiplayer Cell Eater Game
 
 A real-time multiplayer game inspired by Agar.io, built with Node.js, Socket.IO, and HTML5 Canvas. Features advanced cell mechanics, a highly configurable client, cross-platform controls, and full Xbox controller support.
