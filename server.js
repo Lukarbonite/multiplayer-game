@@ -1121,10 +1121,16 @@ function encodeInitialState(state) {
 function encodeGameStateUpdate(updatePackage) {
     let bufferSize = 1 + 2 + 2 + 2; // opcode, counts
     updatePackage.updatedCells.forEach(cell => {
-        bufferSize += 4 + (2 + textEncoder.encode(cell.id).length) + 2 + 2 + 2 + 4 + 1; // cellId, id, x, y, radius, score, hasMerge
-        if (cell.mergeCooldown) bufferSize += 8;
+        bufferSize += 4 + 1; // cellId, deltaMask
+        if (cell.deltaMask & 1) bufferSize += 2; // x
+        if (cell.deltaMask & 2) bufferSize += 2; // y
+        if (cell.deltaMask & 4) bufferSize += 2; // radius
+        if (cell.deltaMask & 8) bufferSize += 4; // score
+        if (cell.deltaMask & 16) bufferSize += 8; // mergeCooldown
     });
     updatePackage.newCells.forEach(cell => {
+        // Add size for the cell's owner ID, then the cell data itself
+        bufferSize += (2 + textEncoder.encode(cell.id).length);
         bufferSize += 4 + 2 + 2 + 4 + 2 + (2 + textEncoder.encode(cell.color || '#ffffff').length) + (2 + textEncoder.encode(cell.nickname || '').length) + 1 + 1 + 8 + (2 + textEncoder.encode(cell.ownerId || '').length);
         if (cell.image && cell.type === 'player') {
             bufferSize += 2 + textEncoder.encode(cell.image).length;
@@ -1138,18 +1144,25 @@ function encodeGameStateUpdate(updatePackage) {
 
     view.setUint8(offset, S2C_OPCODES.GAME_STATE_UPDATE); offset += 1;
 
-    // Updated cells
+    // Updated cells (Delta-compressed)
     view.setUint16(offset, updatePackage.updatedCells.length, true); offset += 2;
     updatePackage.updatedCells.forEach(cell => {
         view.setUint32(offset, cell.cellId, true); offset += 4;
-        offset = writeString(view, offset, cell.id);
-        view.setInt16(offset, Math.round(cell.x), true); offset += 2;
-        view.setInt16(offset, Math.round(cell.y), true); offset += 2;
-        view.setUint16(offset, Math.round(cell.radius * 10), true); offset += 2;
-        view.setUint32(offset, cell.score, true); offset += 4;
-        const hasMerge = cell.mergeCooldown !== undefined;
-        view.setUint8(offset, hasMerge ? 1 : 0); offset += 1;
-        if(hasMerge) {
+        view.setUint8(offset, cell.deltaMask, true); offset += 1;
+
+        if (cell.deltaMask & 1) { // x
+            view.setInt16(offset, cell.x, true); offset += 2;
+        }
+        if (cell.deltaMask & 2) { // y
+            view.setInt16(offset, cell.y, true); offset += 2;
+        }
+        if (cell.deltaMask & 4) { // radius
+            view.setUint16(offset, cell.radius, true); offset += 2;
+        }
+        if (cell.deltaMask & 8) { // score
+            view.setUint32(offset, cell.score, true); offset += 4;
+        }
+        if (cell.deltaMask & 16) { // mergeCooldown
             view.setFloat64(offset, cell.mergeCooldown, true); offset += 8;
         }
     });
@@ -1157,6 +1170,7 @@ function encodeGameStateUpdate(updatePackage) {
     // New cells
     view.setUint16(offset, updatePackage.newCells.length, true); offset += 2;
     updatePackage.newCells.forEach(cell => {
+        offset = writeString(view, offset, cell.id); // Write owner ID before cell data
         offset = encodeCell(view, offset, cell);
     });
 
@@ -1252,22 +1266,38 @@ setInterval(() => {
                 delete newCell.launch_vy;
                 updatePackage.newCells.push(newCell);
             } else {
-                const dx = cell.x - oldCellState.x;
-                const dy = cell.y - oldCellState.y;
-                const dr = cell.radius - oldCellState.radius;
+                let deltaMask = 0;
+                const updatedCellData = { cellId: cell.cellId };
 
-                if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1 || Math.abs(dr) > 0.1) {
-                    const updatedCellData = {
-                        cellId: cell.cellId,
-                        id: cell.id,
-                        x: cell.x,
-                        y: cell.y,
-                        radius: cell.radius,
-                        score: Math.round(cell.score),
-                    };
-                    if (cell.mergeCooldown !== oldCellState.mergeCooldown) {
-                        updatedCellData.mergeCooldown = cell.mergeCooldown;
-                    }
+                const quantizedX = Math.round(cell.x);
+                const quantizedY = Math.round(cell.y);
+                const quantizedRadius = Math.round(cell.radius * 10);
+                const quantizedScore = Math.round(cell.score);
+                const mergeCooldown = cell.mergeCooldown || 0;
+
+                if (quantizedX !== oldCellState.x) {
+                    deltaMask |= 1;
+                    updatedCellData.x = quantizedX;
+                }
+                if (quantizedY !== oldCellState.y) {
+                    deltaMask |= 2;
+                    updatedCellData.y = quantizedY;
+                }
+                if (quantizedRadius !== oldCellState.radius) {
+                    deltaMask |= 4;
+                    updatedCellData.radius = quantizedRadius;
+                }
+                if (quantizedScore !== oldCellState.score) {
+                    deltaMask |= 8;
+                    updatedCellData.score = quantizedScore;
+                }
+                if (mergeCooldown !== oldCellState.mergeCooldown) {
+                    deltaMask |= 16;
+                    updatedCellData.mergeCooldown = mergeCooldown;
+                }
+
+                if (deltaMask > 0) {
+                    updatedCellData.deltaMask = deltaMask;
                     updatePackage.updatedCells.push(updatedCellData);
                 }
             }
@@ -1283,14 +1313,16 @@ setInterval(() => {
             io.to(playerId).emit('message', encodeGameStateUpdate(updatePackage));
         }
 
+        // Update the last broadcasted state with quantized values for accurate delta next frame
         const newPlayerState = {};
         allCurrentCells.forEach(cell => {
             if (isInInterestArea(cell, interestArea)) {
                 newPlayerState[cell.cellId] = {
-                    x: cell.x,
-                    y: cell.y,
-                    radius: cell.radius,
-                    mergeCooldown: cell.mergeCooldown,
+                    x: Math.round(cell.x),
+                    y: Math.round(cell.y),
+                    radius: Math.round(cell.radius * 10),
+                    score: Math.round(cell.score),
+                    mergeCooldown: cell.mergeCooldown || 0,
                 };
             }
         });

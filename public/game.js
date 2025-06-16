@@ -13,6 +13,7 @@ let baseRadius = 20;
 let debugMode = false;
 let customZoomMultiplier = 1.0;
 let activeInputTarget = null;
+let cellMap = new Map(); // For efficient cell lookup by cellId
 
 // Performance monitoring
 let frameCount = 0;
@@ -969,6 +970,7 @@ function showStartScreen(score) {
     playButton.disabled = false;
     imagePicker.value = '';
     players = {};
+    cellMap.clear(); // Clear the cell map
     imageCache = {};
     gameReady = false;
     debugMode = false;
@@ -1050,6 +1052,7 @@ function initializeGame(nickname, color, imageDataUrl) {
                 world.width = view.getUint16(offset, true); offset += 2;
                 world.height = view.getUint16(offset, true); offset += 2;
                 players = {};
+                cellMap.clear();
                 const playerCount = view.getUint16(offset, true); offset += 2;
                 for (let i = 0; i < playerCount; i++) {
                     const playerIdData = readString(view, offset);
@@ -1065,6 +1068,7 @@ function initializeGame(nickname, color, imageDataUrl) {
                         cell.serverX = cell.x;
                         cell.serverY = cell.y;
                         players[playerId].push(cell);
+                        cellMap.set(cell.cellId, cell);
                     }
                 }
                 processAndLoadImages(players);
@@ -1083,40 +1087,57 @@ function initializeGame(nickname, color, imageDataUrl) {
             }
             case S2C_OPCODES.GAME_STATE_UPDATE: {
                 if (!gameReady) return;
+                // Updated cells (Delta-compressed)
                 const updatedCellCount = view.getUint16(offset, true); offset += 2;
                 for(let i=0; i<updatedCellCount; i++) {
                     const cellId = view.getUint32(offset, true); offset += 4;
-                    const idData = readString(view, offset);
-                    const id = idData.value;
-                    offset = idData.newOffset;
-                    const cellToUpdate = players[id] ? players[id].find(c => c.cellId === cellId) : null;
+                    const deltaMask = view.getUint8(offset, true); offset += 1;
+                    const cellToUpdate = cellMap.get(cellId);
+
                     if (cellToUpdate) {
-                        cellToUpdate.serverX = view.getInt16(offset, true); offset += 2;
-                        cellToUpdate.serverY = view.getInt16(offset, true); offset += 2;
-                        cellToUpdate.radius = view.getUint16(offset, true) / 10; offset += 2;
-                        cellToUpdate.score = view.getUint32(offset, true); offset += 4;
-                        const hasMerge = view.getUint8(offset++) === 1;
-                        if(hasMerge) {
+                        if (deltaMask & 1) { // x
+                            cellToUpdate.serverX = view.getInt16(offset, true); offset += 2;
+                        }
+                        if (deltaMask & 2) { // y
+                            cellToUpdate.serverY = view.getInt16(offset, true); offset += 2;
+                        }
+                        if (deltaMask & 4) { // radius
+                            cellToUpdate.radius = view.getUint16(offset, true) / 10; offset += 2;
+                        }
+                        if (deltaMask & 8) { // score
+                            cellToUpdate.score = view.getUint32(offset, true); offset += 4;
+                        }
+                        if (deltaMask & 16) { // mergeCooldown
                             cellToUpdate.mergeCooldown = view.getFloat64(offset, true); offset += 8;
                         }
                     } else {
-                        offset += 2 + 2 + 2 + 4;
-                        const hasMerge = view.getUint8(offset++) === 1;
-                        if(hasMerge) offset += 8;
+                        // Cell is not known, skip its data to avoid crashing
+                        console.warn(`Received update for unknown cellId: ${cellId}`);
+                        if (deltaMask & 1) offset += 2;
+                        if (deltaMask & 2) offset += 2;
+                        if (deltaMask & 4) offset += 2;
+                        if (deltaMask & 8) offset += 4;
+                        if (deltaMask & 16) offset += 8;
                     }
                 }
+                // New cells
                 const newCellCount = view.getUint16(offset, true); offset += 2;
                 for (let i = 0; i < newCellCount; i++) {
+                    const idData = readString(view, offset);
+                    const id = idData.value;
+                    offset = idData.newOffset;
+
                     const cellData = decodeCell(view, offset);
                     const newCell = cellData.cell;
                     offset = cellData.newOffset;
-                    const id = newCell.type === 'ejected' ? DUD_PLAYER_ID : Object.keys(players).find(pId => players[pId].some(c => c.cellId === newCell.cellId));
-                    newCell.id = id || DUD_PLAYER_ID;
+                    newCell.id = id;
+
                     if (!players[newCell.id]) players[newCell.id] = [];
-                    if (!players[newCell.id].some(c => c.cellId === newCell.cellId)) {
+                    if (!cellMap.has(newCell.cellId)) {
                         newCell.serverX = newCell.x;
                         newCell.serverY = newCell.y;
                         players[newCell.id].push(newCell);
+                        cellMap.set(newCell.cellId, newCell);
                         if (newCell.image && !imageCache[newCell.id]) {
                             const img = new Image();
                             img.src = newCell.image;
@@ -1124,18 +1145,23 @@ function initializeGame(nickname, color, imageDataUrl) {
                         }
                     }
                 }
+                // Eaten cells
                 const eatenCellCount = view.getUint16(offset, true); offset += 2;
                 for (let i = 0; i < eatenCellCount; i++) {
                     const eatenId = view.getUint32(offset, true); offset += 4;
-                    for (const playerId in players) {
-                        const index = players[playerId].findIndex(c => c.cellId === eatenId);
-                        if (index > -1) {
-                            players[playerId].splice(index, 1);
-                            if (players[playerId].length === 0 && playerId !== DUD_PLAYER_ID) {
-                                delete players[playerId];
+                    const cellToRemove = cellMap.get(eatenId);
+                    if (cellToRemove) {
+                        const ownerId = cellToRemove.id;
+                        if(players[ownerId]) {
+                            const index = players[ownerId].findIndex(c => c.cellId === eatenId);
+                            if (index > -1) {
+                                players[ownerId].splice(index, 1);
+                                if (players[ownerId].length === 0 && ownerId !== DUD_PLAYER_ID) {
+                                    delete players[ownerId];
+                                }
                             }
-                            break;
                         }
+                        cellMap.delete(eatenId);
                     }
                 }
                 break;
@@ -1178,8 +1204,12 @@ function initializeGame(nickname, color, imageDataUrl) {
             }
             case S2C_OPCODES.PLAYER_DISCONNECTED: {
                 const idData = readString(view, offset);
-                delete players[idData.value];
-                delete imageCache[idData.value];
+                const playerId = idData.value;
+                if (players[playerId]) {
+                    players[playerId].forEach(cell => cellMap.delete(cell.cellId));
+                    delete players[playerId];
+                    delete imageCache[playerId];
+                }
                 break;
             }
         }
