@@ -23,7 +23,7 @@
             <p id="error-message" class="hidden"></p>
         </div>
 
-        <!-- NEW: Performance Settings Panel -->
+        <!-- Performance Settings Panel -->
         <div id="performance-settings">
             <h2>Settings</h2>
             <div class="setting-item">
@@ -77,6 +77,24 @@
                 Settings are saved automatically. <br>
                 Lowering quality can improve performance on older devices.
             </p>
+        </div>
+
+        <!-- Keybinds Settings Panel -->
+        <div id="keybinds-settings">
+            <h2>Keybinds</h2>
+            <button id="keybind-tab-toggle">
+                <span class="keyboard-label active">Keyboard</span>
+                <span class="controller-label">Controller</span>
+            </button>
+            <!-- Keyboard Binds Panel -->
+            <div id="keyboard-binds" class="keybind-panel active">
+                <!-- Dynamically populated by game.js -->
+            </div>
+            <!-- Controller Binds Panel -->
+            <div id="controller-binds" class="keybind-panel">
+                <!-- Dynamically populated by game.js -->
+            </div>
+            <button id="reset-binds-button">Reset to Defaults</button>
         </div>
     </div>
 </div>

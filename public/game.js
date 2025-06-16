@@ -41,12 +41,40 @@ let settings = {
     gamepadSensitivity: 0.9, // Controller sensitivity (lower is more sensitive)
 };
 
+// --- Keybinds ---
+const DEFAULT_BINDS = {
+    keyboard: {
+        split: { type: 'key', value: 'Space', display: 'Space' },
+        ejectMass: { type: 'key', value: 'KeyW', display: 'W' },
+        openChat: { type: 'key', value: 'Enter', display: 'Enter' },
+        toggleChat: { type: 'key', value: 'KeyC', display: 'CTRL + C', ctrlKey: true },
+        debug: { type: 'key', value: 'Backquote', display: '`' },
+    },
+    controller: {
+        split: { type: 'button', value: 0, display: 'A Button' },
+        ejectMass: { type: 'button', value: 1, display: 'B Button' },
+        toggleChat: { type: 'button', value: 3, display: 'Y Button' },
+        openChat: { type: 'button', value: 9, display: 'Start' },
+        debug: { type: 'button', value: 8, display: 'Back' },
+        zoomIn: { type: 'button', value: 5, display: 'RB' },
+        zoomOut: { type: 'button', value: 4, display: 'LB' },
+    }
+};
+let keybinds = JSON.parse(JSON.stringify(DEFAULT_BINDS)); // Deep copy
+let listeningForBind = null; // { action, device }
+
 // Xbox 360 Controller variables
 let gamepadConnected = false;
 let gamepadIndex = -1;
 let gamepadDeadzone = 0.15;
 let gamepadButtonStates = {};
 let gamepadVibrationSupported = false;
+
+// Start screen navigation
+let focusableElements = [];
+let currentFocusIndex = -1;
+let lastStickInputTime = 0;
+const STICK_INPUT_DELAY = 150; // ms
 
 const MINIMAP_SIZE = 200;
 const MINIMAP_SIZE_MOBILE = 120;
@@ -82,6 +110,12 @@ const settingParticles = document.getElementById('setting-particles');
 const settingSmoothCells = document.getElementById('setting-smoothcells');
 const settingRememberScore = document.getElementById('setting-remember-score');
 
+// Keybinds Elements
+const keybindTabToggle = document.getElementById('keybind-tab-toggle');
+const keyboardBindsPanel = document.getElementById('keyboard-binds');
+const controllerBindsPanel = document.getElementById('controller-binds');
+const resetBindsButton = document.getElementById('reset-binds-button');
+
 // Mobile keyboard elements
 const mobileKeyboard = document.getElementById('mobile-keyboard');
 const keyboardClose = document.getElementById('keyboard-close');
@@ -105,6 +139,7 @@ function loadSettings() {
         }
     } catch (e) {
         console.error("Could not load settings from localStorage.", e);
+        // Reset to default if parsing fails
         settings = {
             highResolution: !isMobileDevice(),
             highQualityGraphics: true,
@@ -119,6 +154,182 @@ function loadSettings() {
         };
     }
     updateSettingsUI();
+}
+
+function saveKeybinds() {
+    try {
+        localStorage.setItem('agarGameKeybinds', JSON.stringify(keybinds));
+    } catch (e) {
+        console.error("Could not save keybinds to localStorage.", e);
+    }
+}
+
+function loadKeybinds() {
+    try {
+        const savedBinds = localStorage.getItem('agarGameKeybinds');
+        if (savedBinds) {
+            const parsedBinds = JSON.parse(savedBinds);
+            // Merge saved binds with defaults to ensure new actions get a default bind
+            keybinds.keyboard = { ...DEFAULT_BINDS.keyboard, ...parsedBinds.keyboard };
+            keybinds.controller = { ...DEFAULT_BINDS.controller, ...parsedBinds.controller };
+        }
+    } catch (e) {
+        console.error("Could not load keybinds from localStorage.", e);
+        keybinds = JSON.parse(JSON.stringify(DEFAULT_BINDS)); // Reset on error
+    }
+    updateKeybindsUI();
+}
+
+function updateKeybindsUI() {
+    const actionLabels = {
+        split: 'Split', ejectMass: 'Eject Mass', openChat: 'Open Chat',
+        toggleChat: 'Toggle Chat', debug: 'Toggle Debug',
+        zoomIn: 'Zoom In', zoomOut: 'Zoom Out'
+    };
+
+    const createBindItem = (panel, device, action, bind) => {
+        const item = document.createElement('div');
+        item.className = 'bind-item';
+
+        const label = document.createElement('label');
+        label.textContent = actionLabels[action] || action;
+        item.appendChild(label);
+
+        const button = document.createElement('button');
+        button.className = 'bind-button';
+        button.dataset.action = action;
+        button.dataset.device = device;
+        button.textContent = bind.display;
+        item.appendChild(button);
+
+        panel.appendChild(item);
+    };
+
+    keyboardBindsPanel.innerHTML = '';
+    controllerBindsPanel.innerHTML = '';
+
+    for (const [action, bind] of Object.entries(keybinds.keyboard)) {
+        createBindItem(keyboardBindsPanel, 'keyboard', action, bind);
+    }
+    for (const [action, bind] of Object.entries(keybinds.controller)) {
+        createBindItem(controllerBindsPanel, 'controller', action, bind);
+    }
+}
+
+function setupKeybindsListeners() {
+    const keyboardLabel = keybindTabToggle.querySelector('.keyboard-label');
+    const controllerLabel = keybindTabToggle.querySelector('.controller-label');
+
+    // New listener for the single toggle button
+    keybindTabToggle.addEventListener('click', () => {
+        const isKeyboardCurrentlyActive = keyboardBindsPanel.classList.contains('active');
+
+        // A single click should toggle to the other panel
+        const switchToController = isKeyboardCurrentlyActive;
+
+        // Toggle visibility of the panels
+        keyboardBindsPanel.classList.toggle('active', !switchToController);
+        controllerBindsPanel.classList.toggle('active', switchToController);
+
+        // Toggle the visual style of the labels inside the button
+        keyboardLabel.classList.toggle('active', !switchToController);
+        controllerLabel.classList.toggle('active', switchToController);
+
+        // If we were in the middle of a bind operation, cancel it.
+        if (listeningForBind) {
+            listeningForBind = null;
+            updateKeybindsUI(); // Redraw the UI to reset the "listening..." text.
+        }
+
+        // The visibility of elements has changed, so we must update the focus list.
+        updateFocusableElements();
+    });
+
+    // The logic for the reset button and individual bind buttons remains the same.
+    resetBindsButton.addEventListener('click', () => {
+        if (confirm('Are you sure you want to reset all keybinds to their default values?')) {
+            keybinds = JSON.parse(JSON.stringify(DEFAULT_BINDS));
+            saveKeybinds();
+            updateKeybindsUI();
+        }
+    });
+
+    document.getElementById('keybinds-settings').addEventListener('click', (e) => {
+        if (e.target.classList.contains('bind-button')) {
+            if (listeningForBind) { // Cancel previous listener
+                updateKeybindsUI();
+            }
+
+            const action = e.target.dataset.action;
+            const device = e.target.dataset.device;
+
+            if (device === 'controller' && !gamepadConnected) {
+                alert('Please connect an Xbox controller to set controller binds.');
+                return;
+            }
+
+            listeningForBind = { action, device };
+            e.target.textContent = 'Press a key/button...';
+            e.target.classList.add('listening');
+
+            if (device === 'keyboard') {
+                window.addEventListener('keydown', captureKey, { once: true, capture: true });
+            }
+        }
+    });
+}
+
+function captureKey(e) {
+    if (!listeningForBind || listeningForBind.device !== 'keyboard') return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const { action } = listeningForBind;
+    const parts = [];
+    if (e.ctrlKey) parts.push('CTRL');
+    if (e.shiftKey) parts.push('SHIFT');
+    if (e.altKey) parts.push('ALT');
+
+    let keyDisplay = e.key.toUpperCase();
+    if (e.code === 'Space') keyDisplay = 'Space';
+    if (e.code === 'Backquote') keyDisplay = '`';
+    parts.push(keyDisplay);
+
+    keybinds.keyboard[action] = {
+        type: 'key',
+        value: e.code,
+        display: parts.join(' + '),
+        ctrlKey: e.ctrlKey,
+        altKey: e.altKey,
+        shiftKey: e.shiftKey
+    };
+
+    saveKeybinds();
+    listeningForBind = null;
+    updateKeybindsUI();
+}
+
+function captureControllerButton(buttonIndex) {
+    if (!listeningForBind || listeningForBind.device !== 'controller') return;
+
+    const buttonNames = {
+        0: 'A', 1: 'B', 2: 'X', 3: 'Y', 4: 'LB', 5: 'RB', 6: 'LT', 7: 'RT',
+        8: 'Back', 9: 'Start', 10: 'LS', 11: 'RS', 12: 'D-Pad Up',
+        13: 'D-Pad Down', 14: 'D-Pad Left', 15: 'D-Pad Right'
+    };
+
+    const { action } = listeningForBind;
+
+    keybinds.controller[action] = {
+        type: 'button',
+        value: buttonIndex,
+        display: buttonNames[buttonIndex] || `Button ${buttonIndex}`
+    };
+
+    saveKeybinds();
+    listeningForBind = null;
+    updateKeybindsUI();
+    triggerControllerVibration(100, 0.5, 0.5); // Feedback for successful bind
 }
 
 function updateSettingsUI() {
@@ -194,39 +405,34 @@ function setupSettingsListeners() {
 // --- Xbox 360 Controller Setup ---
 function setupGamepadSupport() {
     console.log('Setting up Xbox 360 controller support...');
-
-    if (!('getGamepads' in navigator)) {
-        console.log('Gamepad API not supported in this browser');
-        return;
-    }
+    if (!('getGamepads' in navigator)) return;
 
     window.addEventListener('gamepadconnected', (e) => {
         console.log('Gamepad connected:', e.gamepad.id);
-
         const gamepadId = e.gamepad.id.toLowerCase();
         if (gamepadId.includes('xbox') || gamepadId.includes('xinput') || gamepadId.includes('360')) {
             gamepadConnected = true;
             gamepadIndex = e.gamepad.index;
             gamepadVibrationSupported = e.gamepad.vibrationActuator !== undefined;
-
             gamepadButtonStates = {};
             for (let i = 0; i < e.gamepad.buttons.length; i++) {
                 gamepadButtonStates[i] = false;
             }
-
+            if (!gameReady) {
+                updateFocusableElements();
+            }
             addSystemMessage('Xbox 360 controller connected!');
-            console.log(`Xbox controller connected at index ${gamepadIndex}, vibration: ${gamepadVibrationSupported}`);
-        } else {
-            console.log('Connected gamepad is not an Xbox controller:', e.gamepad.id);
         }
     });
 
     window.addEventListener('gamepaddisconnected', (e) => {
-        console.log('Gamepad disconnected:', e.gamepad.id);
         if (e.gamepad.index === gamepadIndex) {
             gamepadConnected = false;
             gamepadIndex = -1;
             gamepadButtonStates = {};
+            if (!gameReady) {
+                updateFocusableElements();
+            }
             addSystemMessage('Xbox 360 controller disconnected');
         }
     });
@@ -235,19 +441,145 @@ function setupGamepadSupport() {
 }
 
 function pollGamepad() {
-    if (gamepadConnected && gameReady && socket && socket.connected) {
-        const gamepads = navigator.getGamepads();
+    const gamepads = navigator.getGamepads();
+    if (gamepadConnected && gamepads[gamepadIndex]) {
         const gamepad = gamepads[gamepadIndex];
-
-        if (gamepad) {
+        if (startScreen.style.display !== 'none') {
+            handleGamepadOnStartScreen(gamepad);
+        } else if (gameReady && socket && socket.connected) {
             handleGamepadInput(gamepad);
-        } else {
-            gamepadConnected = false;
-            gamepadIndex = -1;
+        }
+    }
+    requestAnimationFrame(pollGamepad);
+}
+
+function handleGamepadOnStartScreen(gamepad) {
+    const now = performance.now();
+
+    // Stick Navigation with Debouncing
+    if (now - lastStickInputTime > STICK_INPUT_DELAY) {
+        const stickX = gamepad.axes[0];
+        const stickY = gamepad.axes[1];
+        const navDeadzone = 0.5; // Higher deadzone for menu navigation to prevent accidental input
+
+        let direction = null;
+        if (stickY < -navDeadzone) {
+            direction = 'up';
+        } else if (stickY > navDeadzone) {
+            direction = 'down';
+        } else if (stickX < -navDeadzone) {
+            direction = 'left';
+        } else if (stickX > navDeadzone) {
+            direction = 'right';
+        }
+
+        if (direction) {
+            findNextFocus(direction);
+            lastStickInputTime = now;
         }
     }
 
-    requestAnimationFrame(pollGamepad);
+    // Button Presses (Logic remains the same, included for context)
+    for (let i = 0; i < gamepad.buttons.length; i++) {
+        const isPressed = gamepad.buttons[i].pressed;
+        const wasPressed = gamepadButtonStates[i] || false;
+
+        if (isPressed && !wasPressed) {
+            // Capture input if we are waiting for a keybind
+            if (listeningForBind && listeningForBind.device === 'controller') {
+                captureControllerButton(i);
+                break; // Stop further processing for this frame
+            }
+
+            // Otherwise, "click" the focused element with the A button
+            if (i === 0 && currentFocusIndex > -1 && focusableElements[currentFocusIndex]) {
+                focusableElements[currentFocusIndex].click();
+            }
+        }
+        gamepadButtonStates[i] = isPressed;
+    }
+}
+
+function findNextFocus(direction) {
+    if (currentFocusIndex < 0 || focusableElements.length < 2) {
+        // If there's no current focus, set it to the first element
+        currentFocusIndex = 0;
+        updateFocusVisuals();
+        return;
+    }
+
+    const currentEl = focusableElements[currentFocusIndex];
+    const currentRect = currentEl.getBoundingClientRect();
+
+    let bestCandidateIndex = -1;
+    let bestCandidateScore = Infinity;
+
+    for (let i = 0; i < focusableElements.length; i++) {
+        if (i === currentFocusIndex) continue;
+
+        const candidateEl = focusableElements[i];
+        const candidateRect = candidateEl.getBoundingClientRect();
+
+        let primaryDist = 0;
+        let secondaryDist = 0;
+        let isCandidate = false;
+
+        switch (direction) {
+            case 'down':
+                // Candidate must be below the current element's top edge
+                if (candidateRect.top > currentRect.top) {
+                    primaryDist = candidateRect.top - currentRect.bottom;
+                    secondaryDist = Math.abs((currentRect.left + currentRect.width / 2) - (candidateRect.left + candidateRect.width / 2));
+                    isCandidate = true;
+                }
+                break;
+            case 'up':
+                // Candidate must be above the current element's bottom edge
+                if (candidateRect.bottom < currentRect.bottom) {
+                    primaryDist = currentRect.top - candidateRect.bottom;
+                    secondaryDist = Math.abs((currentRect.left + currentRect.width / 2) - (candidateRect.left + candidateRect.width / 2));
+                    isCandidate = true;
+                }
+                break;
+            case 'right':
+                // Candidate must be to the right of the current element's left edge
+                if (candidateRect.left > currentRect.left) {
+                    primaryDist = candidateRect.left - currentRect.right;
+                    secondaryDist = Math.abs((currentRect.top + currentRect.height / 2) - (candidateRect.top + candidateRect.height / 2));
+                    isCandidate = true;
+                }
+                break;
+            case 'left':
+                // Candidate must be to the left of the current element's right edge
+                if (candidateRect.right < currentRect.right) {
+                    primaryDist = currentRect.left - candidateRect.right;
+                    secondaryDist = Math.abs((currentRect.top + currentRect.height / 2) - (candidateRect.top + candidateRect.height / 2));
+                    isCandidate = true;
+                }
+                break;
+        }
+
+        if (isCandidate) {
+            // If the primary distance is negative, it means the elements overlap on that axis.
+            // This is good, so we make the distance 0 to prioritize it.
+            if (primaryDist < 0) primaryDist = 0;
+
+            // The final score heavily penalizes misalignment (secondary distance).
+            // This makes the algorithm prefer elements in a straight line, even if they are a bit further.
+            // This is the "ray cast" logic.
+            const score = primaryDist + (secondaryDist * 3);
+
+            if (score < bestCandidateScore) {
+                bestCandidateScore = score;
+                bestCandidateIndex = i;
+            }
+        }
+    }
+
+    if (bestCandidateIndex !== -1) {
+        currentFocusIndex = bestCandidateIndex;
+        updateFocusVisuals();
+    }
 }
 
 function handleGamepadInput(gamepad) {
@@ -262,16 +594,10 @@ function handleGamepadInput(gamepad) {
     if (rawMagnitude > gamepadDeadzone) {
         const directionX = leftStickX / rawMagnitude;
         const directionY = leftStickY / rawMagnitude;
-
-        // Normalize magnitude from deadzone to 1.0
         const adjustedMagnitude = (rawMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
-
-        // Apply sensitivity curve. A lower sensitivity value means you reach max speed sooner.
         const finalMagnitude = Math.min(1.0, adjustedMagnitude / settings.gamepadSensitivity);
-
         socket.emit('playerInput', { dx: directionX, dy: directionY, magnitude: finalMagnitude });
     } else {
-        // Explicitly send a "stop" signal if inside the deadzone
         socket.emit('playerInput', { dx: 0, dy: 0, magnitude: 0 });
     }
 
@@ -284,49 +610,35 @@ function handleGamepadInput(gamepad) {
         const normalizedMagnitude = (rightMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
         const normalizedX = (rightStickX / rightMagnitude) * normalizedMagnitude;
         const normalizedY = (rightStickY / rightMagnitude) * normalizedMagnitude;
-
         const aimScale = 200 / camera.zoom;
         const aimX = camera.x + normalizedX * aimScale;
         const aimY = camera.y + normalizedY * aimScale;
-
         mousePos.x = (aimX - camera.x) * camera.zoom + canvas.width / 2;
         mousePos.y = (aimY - camera.y) * camera.zoom + canvas.height / 2;
     }
 
     // --- Button Handling ---
-    const buttons = {
-        A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7,
-        Back: 8, Start: 9, LS: 10, RS: 11,
-        DPadUp: 12, DPadDown: 13, DPadLeft: 14, DPadRight: 15
-    };
-
-    Object.entries(buttons).forEach(([buttonName, buttonIndex]) => {
-        if (gamepad.buttons[buttonIndex]) {
-            const isPressed = gamepad.buttons[buttonIndex].pressed;
-            const wasPressed = gamepadButtonStates[buttonIndex] || false;
-
-            if (isPressed && !wasPressed) {
-                handleGamepadButton(buttonName, buttonIndex);
-            }
-
-            gamepadButtonStates[buttonIndex] = isPressed;
+    for (let i = 0; i < gamepad.buttons.length; i++) {
+        const isPressed = gamepad.buttons[i].pressed;
+        const wasPressed = gamepadButtonStates[i] || false;
+        if (isPressed && !wasPressed) {
+            handleGamepadButton(i);
         }
-    });
+        gamepadButtonStates[i] = isPressed;
+    }
 
+    // --- Triggers for Zoom ---
     const leftTrigger = gamepad.buttons[6] ? gamepad.buttons[6].value : 0;
     const rightTrigger = gamepad.buttons[7] ? gamepad.buttons[7].value : 0;
-
-    if (leftTrigger > 0.1) {
-        // Prevent zooming out past the default 1.0x multiplier
-        customZoomMultiplier = Math.max(1.0, customZoomMultiplier - leftTrigger * 0.02);
-    }
-    if (rightTrigger > 0.1) {
-        customZoomMultiplier = Math.min(5.0, customZoomMultiplier + rightTrigger * 0.02);
-    }
+    if (leftTrigger > 0.1) customZoomMultiplier = Math.max(1.0, customZoomMultiplier - leftTrigger * 0.02);
+    if (rightTrigger > 0.1) customZoomMultiplier = Math.min(5.0, customZoomMultiplier + rightTrigger * 0.02);
 }
 
-function handleGamepadButton(buttonName, buttonIndex) {
-    console.log(`Xbox button pressed: ${buttonName} (${buttonIndex})`);
+function handleGamepadButton(buttonIndex) {
+    const action = Object.keys(keybinds.controller).find(
+        key => keybinds.controller[key].value === buttonIndex
+    );
+    if (!action) return;
 
     const selfCells = players[selfId];
     if (!selfCells || selfCells.length === 0) return;
@@ -334,22 +646,19 @@ function handleGamepadButton(buttonName, buttonIndex) {
     const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
     const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
 
-    switch (buttonName) {
-        case 'A':
+    switch (action) {
+        case 'split':
             socket.emit('split', { mouseX: worldMouseX, mouseY: worldMouseY });
             triggerControllerVibration(200, 0.3, 0.3);
             break;
-
-        case 'B':
+        case 'ejectMass':
             socket.emit('ejectMass', { mouseX: worldMouseX, mouseY: worldMouseY });
             triggerControllerVibration(150, 0.2, 0.2);
             break;
-
-        case 'Y':
+        case 'toggleChat':
             toggleChat(false);
             break;
-
-        case 'Start':
+        case 'openChat':
             if (isMobileDevice()) {
                 activeInputTarget = chatInput;
                 showMobileKeyboard();
@@ -357,43 +666,17 @@ function handleGamepadButton(buttonName, buttonIndex) {
                 toggleChat(true);
             }
             break;
-
-        case 'Back':
+        case 'debug':
             debugMode = !debugMode;
             addSystemMessage(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
             break;
-
-        case 'LB':
-            // Prevent zooming out past the default 1.0x multiplier
+        case 'zoomOut':
             customZoomMultiplier = Math.max(1.0, customZoomMultiplier - 0.2);
             addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
             break;
-
-        case 'RB':
+        case 'zoomIn':
             customZoomMultiplier = Math.min(5.0, customZoomMultiplier + 0.2);
             addSystemMessage(`Zoom: ${customZoomMultiplier.toFixed(1)}x`);
-            break;
-
-        case 'DPadUp':
-            gamepadDeadzone = Math.max(0.05, gamepadDeadzone - 0.05);
-            addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
-            break;
-
-        case 'DPadDown':
-            gamepadDeadzone = Math.min(0.5, gamepadDeadzone + 0.05);
-            addSystemMessage(`Controller deadzone: ${gamepadDeadzone.toFixed(2)}`);
-            break;
-
-        case 'DPadLeft':
-            settings.gamepadSensitivity = Math.max(0.1, settings.gamepadSensitivity - 0.05);
-            saveSettings();
-            addSystemMessage(`Controller sensitivity: ${settings.gamepadSensitivity.toFixed(2)}`);
-            break;
-
-        case 'DPadRight':
-            settings.gamepadSensitivity = Math.min(1.0, settings.gamepadSensitivity + 0.05);
-            saveSettings();
-            addSystemMessage(`Controller sensitivity: ${settings.gamepadSensitivity.toFixed(2)}`);
             break;
     }
 }
@@ -649,6 +932,7 @@ function processImageFile(file) {
 
 function showStartScreen(score) {
     startScreen.style.display = 'flex';
+    updateFocusableElements();
     const chatConsoleEl = document.getElementById('chat-console');
     if (chatConsoleEl) chatConsoleEl.classList.add('hidden');
     hideMobileKeyboard();
@@ -680,6 +964,69 @@ function showStartScreen(score) {
         socket.disconnect();
     }
 }
+
+window.addEventListener('keydown', (e) => {
+    if (listeningForBind) return; // Don't trigger game actions while binding a key
+    if (!socket || !socket.connected || !gameReady) return;
+    if (!isMobileDevice() && (document.activeElement === chatInput || document.activeElement === nicknameInput)) return;
+
+    // Find the action corresponding to the pressed key
+    const action = Object.keys(keybinds.keyboard).find(key => {
+        const bind = keybinds.keyboard[key];
+        return bind.value === e.code &&
+            !!bind.ctrlKey === e.ctrlKey &&
+            !!bind.shiftKey === e.shiftKey &&
+            !!bind.altKey === e.altKey;
+    });
+
+    if (!action) return;
+    e.preventDefault();
+
+    const selfCells = players[selfId];
+    if (!selfCells || selfCells.length === 0) return;
+
+    const worldMouseX = (mousePos.x - canvas.width / 2) / camera.zoom + camera.x;
+    const worldMouseY = (mousePos.y - canvas.height / 2) / camera.zoom + camera.y;
+
+    switch (action) {
+        case 'split':
+            socket.emit('split', { mouseX: worldMouseX, mouseY: worldMouseY });
+            break;
+        case 'ejectMass':
+            socket.emit('ejectMass', { mouseX: worldMouseX, mouseY: worldMouseY });
+            break;
+        case 'openChat':
+            if (isMobileDevice()) {
+                activeInputTarget = chatInput;
+                showMobileKeyboard();
+            } else {
+                chatInput.focus();
+            }
+            break;
+        case 'toggleChat':
+            toggleChat(true);
+            break;
+        case 'debug':
+            debugMode = !debugMode;
+            addSystemMessage(`Debug mode ${debugMode ? 'enabled' : 'disabled'}`);
+            break;
+    }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    setupChatToggle();
+    setupGamepadSupport();
+    loadSettings();
+    setupSettingsListeners();
+    loadKeybinds();
+    setupKeybindsListeners();
+
+    if (isMobileDevice()) {
+        forceMobileChatSize();
+        setupMobileKeyboard();
+    }
+    updateFocusableElements();
+});
 
 function processAndLoadImages(playerData) {
     Object.values(playerData).flat().forEach(cell => {
@@ -1494,6 +1841,7 @@ function resizeCanvas() {
     ctx.scale(dpr, dpr);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = settings.highQualityGraphics ? 'high' : 'low';
+    updateFocusableElements();
 
     if (isMobileDevice()) {
         const cssWidth = displayWidth;
@@ -1529,6 +1877,38 @@ loadSettings();
 resizeCanvas();
 
 requestAnimationFrame(gameLoop);
+
+function updateFocusableElements() {
+    if (startScreen.style.display === 'none') {
+        focusableElements = [];
+        currentFocusIndex = -1;
+        return;
+    }
+
+    focusableElements = Array.from(
+        startScreen.querySelectorAll('button, input, select')
+    ).filter(el => {
+        // Filter out hidden or disabled elements
+        return el.offsetParent !== null && !el.disabled;
+    });
+
+    if (!focusableElements.includes(document.querySelector('.gamepad-focus'))) {
+        currentFocusIndex = 0;
+    } else {
+        currentFocusIndex = focusableElements.indexOf(document.querySelector('.gamepad-focus'));
+    }
+
+    if(gamepadConnected) updateFocusVisuals();
+}
+
+function updateFocusVisuals() {
+    document.querySelectorAll('.gamepad-focus').forEach(el => el.classList.remove('gamepad-focus'));
+    if (currentFocusIndex > -1 && currentFocusIndex < focusableElements.length) {
+        const focusedEl = focusableElements[currentFocusIndex];
+        focusedEl.classList.add('gamepad-focus');
+        focusedEl.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    }
+}
 
 function drawGrid(viewLeft, viewRight, viewTop, viewBottom) {
     const gridSize = 50;

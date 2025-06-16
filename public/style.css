@@ -42,7 +42,7 @@ canvas {
     align-items: flex-start;
     gap: 30px;
     width: 100%;
-    max-width: 750px; /* Max width for side-by-side layout on desktop */
+    max-width: 1100px; /* Max width for side-by-side layout on desktop */
 }
 
 .start-form {
@@ -226,6 +226,118 @@ canvas {
     text-align: center;
     margin-top: 15px;
     line-height: 1.4;
+}
+
+/* --- Keybinds Settings Styles --- */
+#keybinds-settings {
+    background-color: #2c3e50;
+    padding: 20px 30px;
+    border-radius: 10px;
+    width: 300px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+#keybinds-settings h2 {
+    margin-top: 0;
+    text-align: center;
+    margin-bottom: 15px;
+    font-size: 22px;
+}
+
+#keybind-tab-toggle {
+    display: flex;
+    width: 100%;
+    margin-bottom: 15px;
+    border-radius: 5px;
+    overflow: hidden;
+    padding: 0;
+    border: none;
+    cursor: pointer;
+}
+
+#keybind-tab-toggle span {
+    flex: 1;
+    padding: 10px;
+    background-color: #34495e;
+    color: white;
+    transition: background-color 0.2s;
+    font-size: 14px;
+    text-align: center;
+}
+
+#keybind-tab-toggle:hover span:not(.active) {
+    background-color: #4a6278;
+}
+
+#keybind-tab-toggle span.active {
+    background-color: #3498db;
+    font-weight: bold;
+}
+
+.keybind-panel {
+    display: none; /* Hidden by default */
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 15px;
+}
+
+.keybind-panel.active {
+    display: flex; /* Shown when active */
+}
+
+.bind-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 16px;
+}
+
+.bind-button {
+    background-color: #34495e;
+    color: white;
+    border: 1px solid #4a6278;
+    border-radius: 5px;
+    padding: 8px 12px;
+    min-width: 120px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.bind-button:hover {
+    border-color: #95a5a6;
+}
+
+.bind-button.listening {
+    background-color: #f1c40f;
+    color: #2c3e50;
+    border-color: #f39c12;
+    font-weight: bold;
+}
+
+#reset-binds-button {
+    background-color: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    padding: 10px;
+    cursor: pointer;
+    transition: background-color 0.2s;
+    font-weight: bold;
+    margin-top: auto; /* Pushes to the bottom */
+}
+
+#reset-binds-button:hover {
+    background-color: #c0392b;
+}
+
+/* Controller navigation focus style */
+.gamepad-focus {
+    outline: 3px solid #3498db !important;
+    outline-offset: 2px;
+    box-shadow: 0 0 10px #3498db;
 }
 
 
@@ -516,7 +628,7 @@ canvas {
         flex-direction: column;
         align-items: center;
     }
-    .start-form, #performance-settings {
+    .start-form, #performance-settings, #keybinds-settings {
         width: 90vw;
         max-width: 400px;
         padding: 20px;
@@ -607,7 +719,7 @@ canvas {
         width: auto;
     }
 
-    .start-form, #performance-settings {
+    .start-form, #performance-settings, #keybinds-settings {
         width: 300px; /* Give panels a fixed width */
         flex-shrink: 0; /* Prevent panels from shrinking */
         max-height: calc(100vh - 40px); /* Limit height to fit screen */
@@ -615,7 +727,7 @@ canvas {
         padding: 20px;
     }
 
-    .start-form h1, #performance-settings h2 {
+    .start-form h1, #performance-settings h2, #keybinds-settings h2 {
         font-size: 20px;
         margin-bottom: 15px;
     }
