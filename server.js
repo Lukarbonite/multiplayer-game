@@ -460,11 +460,23 @@ io.on('connection', (socket) => {
     });
 
     socket.on('playerInput', (input) => {
-        const { worldMouseX, worldMouseY } = input;
-        if (typeof worldMouseX === 'number' && typeof worldMouseY === 'number') {
+        if (!players[socket.id] || !input) return;
+
+        // New controller input (direction and magnitude)
+        if (input.dx !== undefined && input.dy !== undefined && input.magnitude !== undefined) {
             playerInputs[socket.id] = {
-                worldMouseX,
-                worldMouseY
+                dx: input.dx,
+                dy: input.dy,
+                magnitude: input.magnitude,
+                inputType: 'controller'
+            };
+        }
+        // Existing mouse input (target coordinates)
+        else if (typeof input.worldMouseX === 'number' && typeof input.worldMouseY === 'number') {
+            playerInputs[socket.id] = {
+                worldMouseX: input.worldMouseX,
+                worldMouseY: input.worldMouseY,
+                inputType: 'mouse'
             };
         }
     });
@@ -595,21 +607,35 @@ function updatePhysics(deltaTime) {
         const input = playerInputs[playerId];
 
         if (playerCells && input) {
-            playerCells.forEach(cell => {
-                const speed = 5;
-                const speedFactor = 20 / cell.radius;
+            if (input.inputType === 'controller' && input.magnitude > 0) {
+                // New controller-based movement (direction & magnitude)
+                playerCells.forEach(cell => {
+                    const speed = 5; // Base speed
+                    const speedFactor = 20 / cell.radius; // Mass penalty
+                    const maxSpeed = speed * speedFactor;
+                    const currentSpeed = maxSpeed * input.magnitude; // Apply stick magnitude
 
-                let dx = input.worldMouseX - cell.x;
-                let dy = input.worldMouseY - cell.y;
-                const len = Math.hypot(dx, dy);
+                    cell.x += input.dx * currentSpeed * deltaTime * 60;
+                    cell.y += input.dy * currentSpeed * deltaTime * 60;
+                });
+            } else if (input.inputType === 'mouse' || input.inputType === undefined) {
+                // Existing mouse-based movement (move towards a point) and legacy support
+                playerCells.forEach(cell => {
+                    const speed = 5;
+                    const speedFactor = 20 / cell.radius;
 
-                if (len > cell.radius) {
-                    const normalizedX = dx / len;
-                    const normalizedY = dy / len;
-                    cell.x += normalizedX * speed * speedFactor * deltaTime * 60;
-                    cell.y += normalizedY * speed * speedFactor * deltaTime * 60;
-                }
-            });
+                    let dx = input.worldMouseX - cell.x;
+                    let dy = input.worldMouseY - cell.y;
+                    const len = Math.hypot(dx, dy);
+
+                    if (len > cell.radius) {
+                        const normalizedX = dx / len;
+                        const normalizedY = dy / len;
+                        cell.x += normalizedX * speed * speedFactor * deltaTime * 60;
+                        cell.y += normalizedY * speed * speedFactor * deltaTime * 60;
+                    }
+                });
+            }
         }
     }
 

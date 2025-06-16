@@ -37,6 +37,7 @@ let settings = {
     particleEffects: true, // Particle effects
     smoothCells: true, // Smooth cell rendering
     rememberScore: true, // Remember player score
+    gamepadSensitivity: 0.9, // Controller sensitivity (lower is more sensitive)
 };
 
 // Xbox 360 Controller variables
@@ -112,7 +113,8 @@ function loadSettings() {
             renderDistance: 1500,
             particleEffects: true,
             smoothCells: true,
-            rememberScore: true
+            rememberScore: true,
+            gamepadSensitivity: 0.9,
         };
     }
     updateSettingsUI();
@@ -251,25 +253,28 @@ function handleGamepadInput(gamepad) {
     const selfCells = players[selfId];
     if (!selfCells || selfCells.length === 0) return;
 
+    // --- Left Stick for Movement (Direction & Speed) ---
     const leftStickX = gamepad.axes[0];
     const leftStickY = gamepad.axes[1];
+    const rawMagnitude = Math.hypot(leftStickX, leftStickY);
 
-    const leftMagnitude = Math.hypot(leftStickX, leftStickY);
-    if (leftMagnitude > gamepadDeadzone) {
-        const normalizedMagnitude = (leftMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
-        const normalizedX = (leftStickX / leftMagnitude) * normalizedMagnitude;
-        const normalizedY = (leftStickY / leftMagnitude) * normalizedMagnitude;
+    if (rawMagnitude > gamepadDeadzone) {
+        const directionX = leftStickX / rawMagnitude;
+        const directionY = leftStickY / rawMagnitude;
 
-        const movementScale = 400 / camera.zoom;
-        const targetX = camera.x + normalizedX * movementScale;
-        const targetY = camera.y + normalizedY * movementScale;
+        // Normalize magnitude from deadzone to 1.0
+        const adjustedMagnitude = (rawMagnitude - gamepadDeadzone) / (1 - gamepadDeadzone);
 
-        socket.emit('playerInput', { worldMouseX: targetX, worldMouseY: targetY });
+        // Apply sensitivity curve. A lower sensitivity value means you reach max speed sooner.
+        const finalMagnitude = Math.min(1.0, adjustedMagnitude / settings.gamepadSensitivity);
 
-        mousePos.x = (targetX - camera.x) * camera.zoom + canvas.width / 2;
-        mousePos.y = (targetY - camera.y) * camera.zoom + canvas.height / 2;
+        socket.emit('playerInput', { dx: directionX, dy: directionY, magnitude: finalMagnitude });
+    } else {
+        // Explicitly send a "stop" signal if inside the deadzone
+        socket.emit('playerInput', { dx: 0, dy: 0, magnitude: 0 });
     }
 
+    // --- Right Stick for Aiming ---
     const rightStickX = gamepad.axes[2];
     const rightStickY = gamepad.axes[3];
     const rightMagnitude = Math.hypot(rightStickX, rightStickY);
@@ -287,6 +292,7 @@ function handleGamepadInput(gamepad) {
         mousePos.y = (aimY - camera.y) * camera.zoom + canvas.height / 2;
     }
 
+    // --- Button Handling ---
     const buttons = {
         A: 0, B: 1, X: 2, Y: 3, LB: 4, RB: 5, LT: 6, RT: 7,
         Back: 8, Start: 9, LS: 10, RS: 11,
@@ -376,15 +382,15 @@ function handleGamepadButton(buttonName, buttonIndex) {
             break;
 
         case 'DPadLeft':
-            if (socket && socket.connected) {
-                socket.emit('setMass', { mass: 100 });
-            }
+            settings.gamepadSensitivity = Math.max(0.1, settings.gamepadSensitivity - 0.05);
+            saveSettings();
+            addSystemMessage(`Controller sensitivity: ${settings.gamepadSensitivity.toFixed(2)}`);
             break;
 
         case 'DPadRight':
-            if (socket && socket.connected) {
-                socket.emit('setMass', { mass: 1000 });
-            }
+            settings.gamepadSensitivity = Math.min(1.0, settings.gamepadSensitivity + 0.05);
+            saveSettings();
+            addSystemMessage(`Controller sensitivity: ${settings.gamepadSensitivity.toFixed(2)}`);
             break;
     }
 }
@@ -980,12 +986,26 @@ function handleChatCommand(command) {
             addSystemMessage(`Zoom multiplier set to ${zoomValue}x`);
             return true;
 
+        case '/sensitivity':
+        case '/sens':
+            const sensitivityValue = parseFloat(parts[1]);
+            if (isNaN(sensitivityValue) || sensitivityValue < 0.1 || sensitivityValue > 1.0) {
+                addSystemMessage('Usage: /sensitivity <number 0.1-1.0>');
+                addSystemMessage('A lower value means higher sensitivity (max speed reached earlier).');
+                return true;
+            }
+            settings.gamepadSensitivity = sensitivityValue;
+            saveSettings();
+            addSystemMessage(`Controller sensitivity set to ${settings.gamepadSensitivity.toFixed(2)}`);
+            return true;
+
         case '/controller':
             if (gamepadConnected) {
                 addSystemMessage('Xbox 360 controller is connected');
-                addSystemMessage('Controls: Left stick = Move, A = Split, B = Eject');
+                addSystemMessage('Controls: Left stick = Move, Right Stick = Aim, A = Split, B = Eject');
                 addSystemMessage('Y = Toggle chat, Start = Open chat, Back = Debug');
-                addSystemMessage('LB/RB = Zoom, Triggers = Gradual zoom, D-pad = Quick actions');
+                addSystemMessage('LB/RB = Zoom, Triggers = Gradual zoom');
+                addSystemMessage('D-pad Up/Down = Adjust Deadzone, D-pad Left/Right = Adjust Sensitivity');
             } else {
                 addSystemMessage('No Xbox 360 controller detected');
                 addSystemMessage('Connect your controller and it will be detected automatically');
@@ -1001,6 +1021,7 @@ function handleChatCommand(command) {
             addSystemMessage('/debug - Toggle debug information display');
             addSystemMessage('/mass <number> - Set your mass (1-1000000)');
             addSystemMessage('/zoom <number> - Set zoom multiplier (0.1-10)');
+            addSystemMessage('/sensitivity <number> - Set controller sensitivity (0.1-1.0)');
             addSystemMessage('/controller - Show controller status and controls');
             addSystemMessage('/fps - Show current frame rate');
             addSystemMessage('/help - Show this help message');
