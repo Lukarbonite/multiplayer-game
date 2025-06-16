@@ -488,46 +488,52 @@ io.on('connection', (socket) => {
         const { mouseX, mouseY } = data;
         if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
 
-        const cellsToSplit = playerCells.length;
+        // Filter for cells that are large enough to split and sort them by size (largest first)
+        const splittableCells = playerCells
+            .filter(cell => cell.score >= PLAYER_MIN_SPLIT_SCORE)
+            .sort((a, b) => b.score - a.score);
 
-        for (let i = cellsToSplit - 1; i >= 0; i--) {
-            const cell = playerCells[i];
-            if (cell.score >= PLAYER_MIN_SPLIT_SCORE && playerCells.length < 16) {
-                let dx = mouseX - cell.x;
-                let dy = mouseY - cell.y;
-                const len = Math.hypot(dx, dy);
-
-                if (len > 0) {
-                    dx /= len;
-                    dy /= len;
-                } else {
-                    dx = 0;
-                    dy = -1;
-                }
-
-                const score1 = Math.floor(cell.score / 2);
-                const score2 = cell.score - score1;
-
-                cell.score = score1;
-
-                const newRadius = getRadiusFromScore(score1);
-                cell.radius = newRadius;
-                const launchSpeed = newRadius * 15;
-
-                const newCell = {
-                    ...cell,
-                    cellId: cellIdCounter++,
-                    score: score2,
-                    radius: getRadiusFromScore(score2),
-                    x: cell.x + dx * (newRadius + 5),
-                    y: cell.y + dy * (newRadius + 5),
-                    mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-                    launch_vx: dx * launchSpeed,
-                    launch_vy: dy * launchSpeed
-                };
-                cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
-                playerCells.push(newCell);
+        // Iterate through the sorted, splittable cells
+        for (const cell of splittableCells) {
+            // Stop splitting if the player has reached the maximum number of cells
+            if (playerCells.length >= 16) {
+                break;
             }
+
+            let dx = mouseX - cell.x;
+            let dy = mouseY - cell.y;
+            const len = Math.hypot(dx, dy);
+
+            if (len > 0) {
+                dx /= len;
+                dy /= len;
+            } else {
+                dx = 0;
+                dy = -1; // Default split direction
+            }
+
+            const score1 = Math.floor(cell.score / 2);
+            const score2 = cell.score - score1;
+
+            cell.score = score1;
+
+            const newRadius = getRadiusFromScore(score1);
+            cell.radius = newRadius;
+            const launchSpeed = newRadius * 15;
+
+            const newCell = {
+                ...cell,
+                cellId: cellIdCounter++,
+                score: score2,
+                radius: getRadiusFromScore(score2),
+                x: cell.x + dx * (newRadius + 5),
+                y: cell.y + dy * (newRadius + 5),
+                mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                launch_vx: dx * launchSpeed,
+                launch_vy: dy * launchSpeed
+            };
+            cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
+            playerCells.push(newCell);
         }
     });
 
