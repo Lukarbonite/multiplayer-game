@@ -66,7 +66,7 @@ class SpatialHash {
     }
 }
 
-// --- Quadtree Implementation (unchanged but included for completeness) ---
+// --- Quadtree Implementation ---
 class Quadtree {
     constructor(bounds, maxObjects = 10, maxLevels = 5, level = 0) {
         this.bounds = bounds;
@@ -167,7 +167,6 @@ const io = socketIo(server, {
     pingTimeout: 60000,
     pingInterval: 25000,
     upgrade: true,
-    allowEIO3: true,
     // Add compression
     perMessageDeflate: {
         threshold: 1024
@@ -201,6 +200,33 @@ const VIRUS_EJECTIONS_TO_SPLIT = 7;
 const VIRUS_LAUNCH_SPEED = 800;
 
 const DUD_PLAYER_ID = 'duds';
+
+// --- Binary Serialization ---
+const C2S_OPCODES = {
+    JOIN_GAME: 0,
+    PLAYER_INPUT_MOUSE: 1,
+    PLAYER_INPUT_CONTROLLER: 2,
+    SPLIT: 3,
+    EJECT_MASS: 4,
+    CHAT_MESSAGE: 5,
+    SET_MASS: 6,
+    PING: 7,
+};
+
+const S2C_OPCODES = {
+    INITIAL_STATE: 0,
+    GAME_STATE_UPDATE: 1,
+    LEADERBOARD_UPDATE: 2,
+    YOU_DIED: 3,
+    CHAT_MESSAGE: 4,
+    SYSTEM_MESSAGE: 5,
+    PONG: 6,
+    PLAYER_DISCONNECTED: 7,
+    JOIN_ERROR: 8,
+};
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 // Performance settings
 const PHYSICS_UPDATE_RATE = 60; // Hz
@@ -313,71 +339,224 @@ function isInInterestArea(obj, interestArea) {
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
 
-    socket.on('joinGame', (data) => {
-        console.log(`Player ${data.nickname} (${socket.id}) joined successfully.`);
-        const halfWidth = WORLD_WIDTH / 2;
-        const halfHeight = WORLD_HEIGHT / 2;
+    // Single message handler for all binary communication
+    socket.on('message', (data) => {
+        try {
+            if (!(data instanceof Buffer)) {
+                console.warn('Received non-buffer message, which is not expected. Ignoring.');
+                return;
+            }
 
-        // REVISED: Handle score restoration using persistent token
-        let startScore = PLAYER_START_SCORE;
-        if (data.playerToken) {
-            socketIdToPlayerToken[socket.id] = data.playerToken; // Map current socket.id to token
-            if (savedScores[data.playerToken]) {
-                startScore = savedScores[data.playerToken];
-                console.log(`Player ${data.nickname} (${data.playerToken}) is rejoining with a score of ${startScore}`);
-                // Remove score from cache so it can't be used again
-                delete savedScores[data.playerToken];
+            const view = new DataView(data.buffer, data.byteOffset, data.length);
+            const opcode = view.getUint8(0);
+            let offset = 1;
+
+            switch (opcode) {
+                case C2S_OPCODES.JOIN_GAME: {
+                    const nicknameData = readString(view, offset);
+                    offset = nicknameData.newOffset;
+                    const colorData = readString(view, offset);
+                    offset = colorData.newOffset;
+                    const hasImage = view.getUint8(offset++) === 1;
+                    let imageDataUrl = null;
+                    if (hasImage) {
+                        const imageData = readString(view, offset);
+                        offset = imageData.newOffset;
+                        imageDataUrl = imageData.value;
+                    }
+                    const hasToken = view.getUint8(offset++) === 1;
+                    let playerToken = null;
+                    if (hasToken) {
+                        const tokenData = readString(view, offset);
+                        offset = tokenData.newOffset;
+                        playerToken = tokenData.value;
+                    }
+
+                    console.log(`Player ${nicknameData.value} (${socket.id}) joined successfully.`);
+                    const halfWidth = WORLD_WIDTH / 2;
+                    const halfHeight = WORLD_HEIGHT / 2;
+
+                    let startScore = PLAYER_START_SCORE;
+                    if (playerToken) {
+                        socketIdToPlayerToken[socket.id] = playerToken;
+                        if (savedScores[playerToken]) {
+                            startScore = savedScores[playerToken];
+                            delete savedScores[playerToken];
+                        }
+                    }
+
+                    players[socket.id] = [{
+                        x: Math.floor(Math.random() * WORLD_WIDTH) - halfWidth,
+                        y: Math.floor(Math.random() * WORLD_HEIGHT) - halfHeight,
+                        score: startScore,
+                        radius: getRadiusFromScore(startScore),
+                        color: colorData.value || '#ffffff',
+                        nickname: nicknameData.value || 'Player',
+                        type: 'player',
+                        id: socket.id,
+                        cellId: cellIdCounter++,
+                        vx: 0, vy: 0,
+                        image: imageDataUrl || null,
+                        mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                    }];
+                    playerInputs[socket.id] = {
+                        worldMouseX: players[socket.id][0].x,
+                        worldMouseY: players[socket.id][0].y
+                    };
+
+                    const interestArea = calculateInterestArea(socket.id);
+                    const visiblePlayers = {};
+                    for (const [pId, cells] of Object.entries(players)) {
+                        const visibleCells = cells.filter(cell => isInInterestArea(cell, interestArea));
+                        if (visibleCells.length > 0) {
+                            visiblePlayers[pId] = visibleCells;
+                        }
+                    }
+
+                    const initialState = {
+                        players: visiblePlayers,
+                        world: { width: WORLD_WIDTH, height: WORLD_HEIGHT }
+                    };
+                    socket.send(encodeInitialState(initialState));
+
+                    io.send(encodeSystemMessage({ message: `${nicknameData.value} joined the game` }));
+                    break;
+                }
+
+                case C2S_OPCODES.PLAYER_INPUT_MOUSE: {
+                    if (!players[socket.id]) break;
+                    playerInputs[socket.id] = {
+                        worldMouseX: view.getFloat32(offset, true),
+                        worldMouseY: view.getFloat32(offset + 4, true),
+                        inputType: 'mouse'
+                    };
+                    break;
+                }
+
+                case C2S_OPCODES.PLAYER_INPUT_CONTROLLER: {
+                    if (!players[socket.id]) break;
+                    playerInputs[socket.id] = {
+                        dx: view.getFloat32(offset, true),
+                        dy: view.getFloat32(offset + 4, true),
+                        magnitude: view.getFloat32(offset + 8, true),
+                        inputType: 'controller'
+                    };
+                    break;
+                }
+
+                case C2S_OPCODES.SPLIT: {
+                    const playerCells = players[socket.id];
+                    if (!playerCells) break;
+                    const mouseX = view.getFloat32(offset, true);
+                    const mouseY = view.getFloat32(offset + 4, true);
+
+                    const splittableCells = playerCells
+                        .filter(cell => cell.score >= PLAYER_MIN_SPLIT_SCORE)
+                        .sort((a, b) => b.score - a.score);
+
+                    for (const cell of splittableCells) {
+                        if (playerCells.length >= 16) break;
+
+                        let dx = mouseX - cell.x;
+                        let dy = mouseY - cell.y;
+                        const len = Math.hypot(dx, dy);
+                        if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
+
+                        const score1 = Math.floor(cell.score / 2);
+                        const score2 = cell.score - score1;
+                        cell.score = score1;
+                        const newRadius = getRadiusFromScore(score1);
+                        cell.radius = newRadius;
+                        const launchSpeed = newRadius * 15;
+
+                        const newCell = {
+                            ...cell, cellId: cellIdCounter++, score: score2, radius: getRadiusFromScore(score2),
+                            x: cell.x + dx * (newRadius + 5), y: cell.y + dy * (newRadius + 5),
+                            mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
+                            launch_vx: dx * launchSpeed, launch_vy: dy * launchSpeed
+                        };
+                        cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
+                        playerCells.push(newCell);
+                    }
+                    break;
+                }
+
+                case C2S_OPCODES.EJECT_MASS: {
+                    const playerCells = players[socket.id];
+                    if (!playerCells) break;
+                    const mouseX = view.getFloat32(offset, true);
+                    const mouseY = view.getFloat32(offset + 4, true);
+
+                    playerCells.forEach(cell => {
+                        if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
+                            let dx = mouseX - cell.x;
+                            let dy = mouseY - cell.y;
+                            const len = Math.hypot(dx, dy);
+                            if (len > 0) { dx /= len; dy /= len; } else { dx = 0; dy = -1; }
+
+                            cell.score -= EJECTED_MASS_SCORE;
+                            cell.radius = getRadiusFromScore(cell.score);
+
+                            const newDud = {
+                                x: cell.x + dx * (cell.radius + 5), y: cell.y + dy * (cell.radius + 5),
+                                score: EJECTED_MASS_SCORE, radius: EJECTED_MASS_RADIUS, color: cell.color, nickname: '',
+                                type: 'ejected', id: DUD_PLAYER_ID, ownerId: cell.id, cellId: cellIdCounter++,
+                                launch_vx: dx * EJECT_LAUNCH_SPEED, launch_vy: dy * EJECT_LAUNCH_SPEED,
+                            };
+                            players[DUD_PLAYER_ID].push(newDud);
+                        }
+                    });
+                    break;
+                }
+
+                case C2S_OPCODES.CHAT_MESSAGE: {
+                    if (players[socket.id]) {
+                        const messageData = readString(view, offset);
+                        const message = messageData.value.trim().substring(0, 100);
+                        if (message.length > 0) {
+                            const player = players[socket.id][0];
+                            console.log(`Chat from ${player.nickname}: ${message}`);
+                            const chatData = { playerId: socket.id, nickname: player.nickname, message: message };
+                            io.send(encodeChatMessage(chatData));
+                        }
+                    }
+                    break;
+                }
+
+                case C2S_OPCODES.SET_MASS: {
+                    const playerCells = players[socket.id];
+                    if (!playerCells) break;
+
+                    const newMass = Math.max(1, Math.min(1000000, view.getFloat32(offset, true)));
+                    const player = playerCells[0];
+                    console.log(`Setting mass for ${player.nickname} to ${newMass}`);
+
+                    playerCells.forEach(cell => {
+                        cell.score = newMass;
+                        cell.radius = getRadiusFromScore(newMass);
+                    });
+
+                    const buffer = new ArrayBuffer(1 + 2 + textEncoder.encode(`Mass set to ${newMass}`).length);
+                    const msgView = new DataView(buffer);
+                    msgView.setUint8(0, S2C_OPCODES.SYSTEM_MESSAGE);
+                    writeString(msgView, 1, `Mass set to ${newMass}`);
+                    socket.send(buffer);
+
+                    io.send(encodeSystemMessage({ message: `${player.nickname} set their mass to ${newMass}` }));
+                    break;
+                }
+
+                case C2S_OPCODES.PING: {
+                    const buffer = new ArrayBuffer(1);
+                    const pongView = new DataView(buffer);
+                    pongView.setUint8(0, S2C_OPCODES.PONG);
+                    socket.send(buffer);
+                    break;
+                }
             }
-        } else {
-            // If no token, check if a score was sent (legacy, might be removed later)
-            if (data.startScore && typeof data.startScore === 'number') {
-                startScore = Math.max(PLAYER_START_SCORE, Math.min(Math.round(data.startScore), 20000));
-            }
+        } catch (e) {
+            console.error('Error processing binary message:', e);
         }
-
-        players[socket.id] = [{
-            x: Math.floor(Math.random() * WORLD_WIDTH) - halfWidth,
-            y: Math.floor(Math.random() * WORLD_HEIGHT) - halfHeight,
-            score: startScore,
-            radius: getRadiusFromScore(startScore),
-            color: data.color || '#ffffff',
-            nickname: data.nickname || 'Player',
-            type: 'player',
-            id: socket.id,
-            cellId: cellIdCounter++,
-            vx: 0,
-            vy: 0,
-            image: data.image || null,
-            mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-        }];
-        playerInputs[socket.id] = {
-            worldMouseX: players[socket.id][0].x,
-            worldMouseY: players[socket.id][0].y
-        };
-
-        // Only send visible objects on initial state
-        const interestArea = calculateInterestArea(socket.id);
-        const visiblePlayers = {};
-
-        for (const [playerId, cells] of Object.entries(players)) {
-            const visibleCells = cells.filter(cell => isInInterestArea(cell, interestArea));
-            if (visibleCells.length > 0) {
-                visiblePlayers[playerId] = visibleCells;
-            }
-        }
-
-        socket.emit('initialState', {
-            players: visiblePlayers,
-            world: {
-                width: WORLD_WIDTH,
-                height: WORLD_HEIGHT
-            }
-        });
-
-        io.emit('systemMessage', {
-            message: `${data.nickname} joined the game`,
-            timestamp: Date.now()
-        });
     });
 
     socket.on('disconnect', (reason) => {
@@ -386,28 +565,26 @@ io.on('connection', (socket) => {
             const playerNickname = players[socket.id][0].nickname;
             console.log(`Player ${playerNickname} disconnected.`);
 
-            // Server-side score saving on disconnect
             const playerToken = socketIdToPlayerToken[socket.id];
-            // Check if the player still exists (i.e., they weren't eaten)
             if (playerToken && players[socket.id] && players[socket.id].length > 0) {
                 const totalScore = players[socket.id].reduce((sum, cell) => sum + (cell.score || 0), 0);
                 if (totalScore > PLAYER_START_SCORE) {
                     savedScores[playerToken] = Math.round(totalScore);
-                    console.log(`Saved score ${savedScores[playerToken]} for player token ${playerToken}`);
                 }
             }
 
             delete players[socket.id];
             delete playerInputs[socket.id];
             delete playerInterestAreas[socket.id];
-            io.emit('playerDisconnected', socket.id);
 
-            io.emit('systemMessage', {
-                message: `${playerNickname} left the game`,
-                timestamp: Date.now()
-            });
+            const buffer = new ArrayBuffer(1 + 2 + textEncoder.encode(socket.id).length);
+            const view = new DataView(buffer);
+            view.setUint8(0, S2C_OPCODES.PLAYER_DISCONNECTED);
+            writeString(view, 1, socket.id);
+            io.send(buffer);
 
-            // Clean up the token mapping
+            io.send(encodeSystemMessage({ message: `${playerNickname} left the game` }));
+
             if (playerToken) {
                 delete socketIdToPlayerToken[socket.id];
             }
@@ -416,172 +593,6 @@ io.on('connection', (socket) => {
 
     socket.on('connect_error', (error) => {
         console.log('Connection error:', error);
-    });
-
-    socket.on('chatMessage', (data) => {
-        if (players[socket.id] && data.message && data.message.trim().length > 0) {
-            const player = players[socket.id][0];
-            const message = data.message.trim().substring(0, 100);
-
-            console.log(`Chat from ${player.nickname}: ${message}`);
-
-            io.emit('chatMessage', {
-                playerId: socket.id,
-                nickname: player.nickname,
-                message: message,
-                timestamp: Date.now()
-            });
-        }
-    });
-
-    socket.on('setMass', (data) => {
-        const playerCells = players[socket.id];
-        if (!playerCells || !data || typeof data.mass !== 'number') return;
-
-        const newMass = Math.max(1, Math.min(1000000, data.mass));
-        const player = playerCells[0];
-
-        console.log(`Setting mass for ${player.nickname} to ${newMass}`);
-
-        playerCells.forEach(cell => {
-            cell.score = newMass;
-            cell.radius = getRadiusFromScore(newMass);
-        });
-
-        socket.emit('systemMessage', {
-            message: `Mass set to ${newMass}`,
-            timestamp: Date.now()
-        });
-
-        io.emit('systemMessage', {
-            message: `${player.nickname} set their mass to ${newMass}`,
-            timestamp: Date.now()
-        });
-    });
-
-    socket.on('playerInput', (input) => {
-        if (!players[socket.id] || !input) return;
-
-        // New controller input (direction and magnitude)
-        if (input.dx !== undefined && input.dy !== undefined && input.magnitude !== undefined) {
-            playerInputs[socket.id] = {
-                dx: input.dx,
-                dy: input.dy,
-                magnitude: input.magnitude,
-                inputType: 'controller'
-            };
-        }
-        // Existing mouse input (target coordinates)
-        else if (typeof input.worldMouseX === 'number' && typeof input.worldMouseY === 'number') {
-            playerInputs[socket.id] = {
-                worldMouseX: input.worldMouseX,
-                worldMouseY: input.worldMouseY,
-                inputType: 'mouse'
-            };
-        }
-    });
-
-    socket.on('split', (data) => {
-        const playerCells = players[socket.id];
-        if (!playerCells || !data) return;
-
-        const { mouseX, mouseY } = data;
-        if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
-
-        // Filter for cells that are large enough to split and sort them by size (largest first)
-        const splittableCells = playerCells
-            .filter(cell => cell.score >= PLAYER_MIN_SPLIT_SCORE)
-            .sort((a, b) => b.score - a.score);
-
-        // Iterate through the sorted, splittable cells
-        for (const cell of splittableCells) {
-            // Stop splitting if the player has reached the maximum number of cells
-            if (playerCells.length >= 16) {
-                break;
-            }
-
-            let dx = mouseX - cell.x;
-            let dy = mouseY - cell.y;
-            const len = Math.hypot(dx, dy);
-
-            if (len > 0) {
-                dx /= len;
-                dy /= len;
-            } else {
-                dx = 0;
-                dy = -1; // Default split direction
-            }
-
-            const score1 = Math.floor(cell.score / 2);
-            const score2 = cell.score - score1;
-
-            cell.score = score1;
-
-            const newRadius = getRadiusFromScore(score1);
-            cell.radius = newRadius;
-            const launchSpeed = newRadius * 15;
-
-            const newCell = {
-                ...cell,
-                cellId: cellIdCounter++,
-                score: score2,
-                radius: getRadiusFromScore(score2),
-                x: cell.x + dx * (newRadius + 5),
-                y: cell.y + dy * (newRadius + 5),
-                mergeCooldown: Date.now() + PLAYER_MERGE_TIME,
-                launch_vx: dx * launchSpeed,
-                launch_vy: dy * launchSpeed
-            };
-            cell.mergeCooldown = Date.now() + PLAYER_MERGE_TIME;
-            playerCells.push(newCell);
-        }
-    });
-
-    socket.on('ejectMass', (data) => {
-        const playerCells = players[socket.id];
-        if (!playerCells || !data) return;
-
-        const { mouseX, mouseY } = data;
-        if (typeof mouseX !== 'number' || typeof mouseY !== 'number') return;
-
-        playerCells.forEach(cell => {
-            if (cell.score >= PLAYER_MIN_EJECT_SCORE) {
-                let dx = mouseX - cell.x;
-                let dy = mouseY - cell.y;
-                const len = Math.hypot(dx, dy);
-
-                if (len > 0) {
-                    dx /= len;
-                    dy /= len;
-                } else {
-                    dx = 0;
-                    dy = -1;
-                }
-
-                cell.score -= EJECTED_MASS_SCORE;
-                cell.radius = getRadiusFromScore(cell.score);
-
-                const newDud = {
-                    x: cell.x + dx * (cell.radius + 5),
-                    y: cell.y + dy * (cell.radius + 5),
-                    score: EJECTED_MASS_SCORE,
-                    radius: EJECTED_MASS_RADIUS,
-                    color: cell.color,
-                    nickname: '',
-                    type: 'ejected',
-                    id: DUD_PLAYER_ID,
-                    ownerId: cell.id,
-                    cellId: cellIdCounter++,
-                    launch_vx: dx * EJECT_LAUNCH_SPEED,
-                    launch_vy: dy * EJECT_LAUNCH_SPEED,
-                };
-                players[DUD_PLAYER_ID].push(newDud);
-            }
-        });
-    });
-
-    socket.on('ping', () => {
-        socket.emit('pong');
     });
 });
 
@@ -857,7 +868,7 @@ function updatePhysics(deltaTime) {
                 if(virusIndex > -1) dudPlayerCells.splice(virusIndex, 1);
             }
 
-        } else {
+        } if (consumption.type === 'regularConsumption') {
             const { bigger, smaller } = consumption;
             const ownerCells = players[bigger.id];
             if (ownerCells) {
@@ -877,10 +888,21 @@ function updatePhysics(deltaTime) {
                 }
 
                 if (players[smallerOwnerId].length === 0 && smallerOwnerId !== DUD_PLAYER_ID) {
-                    io.to(smallerOwnerId).emit('youDied', { score: Math.max(1, Math.round(smaller.score)) });
+                    const finalScore = Math.max(1, Math.round(smaller.score));
+                    const buffer = new ArrayBuffer(1 + 4);
+                    const view = new DataView(buffer);
+                    view.setUint8(0, S2C_OPCODES.YOU_DIED);
+                    view.setUint32(1, finalScore, true);
+                    io.to(smallerOwnerId).emit('message', buffer);
+
                     delete players[smallerOwnerId];
                     delete playerInputs[smallerOwnerId];
-                    io.emit('playerDisconnected', smallerOwnerId);
+
+                    const disconnectBuffer = new ArrayBuffer(1 + 2 + textEncoder.encode(smallerOwnerId).length);
+                    const disconnectView = new DataView(disconnectBuffer);
+                    disconnectView.setUint8(0, S2C_OPCODES.PLAYER_DISCONNECTED);
+                    writeString(disconnectView, 1, smallerOwnerId);
+                    io.send(disconnectBuffer);
                 }
             }
         }
@@ -1013,9 +1035,185 @@ function updatePhysics(deltaTime) {
     }
 }
 
+function writeString(view, offset, str) {
+    const encoded = textEncoder.encode(str);
+    view.setUint16(offset, encoded.length, true);
+    offset += 2;
+    encoded.forEach((byte, i) => {
+        view.setUint8(offset + i, byte);
+    });
+    return offset + encoded.length;
+}
+
+function readString(view, offset) {
+    const length = view.getUint16(offset, true);
+    offset += 2;
+    const buffer = new Uint8Array(view.buffer, view.byteOffset + offset, length);
+    return {
+        value: textDecoder.decode(buffer),
+        newOffset: offset + length
+    };
+}
+
+function encodeCell(view, offset, cell) {
+    let currentOffset = offset;
+    view.setUint32(currentOffset, cell.cellId, true); currentOffset += 4;
+    view.setInt16(currentOffset, Math.round(cell.x), true); currentOffset += 2;
+    view.setInt16(currentOffset, Math.round(cell.y), true); currentOffset += 2;
+    view.setUint32(currentOffset, Math.round(cell.score), true); currentOffset += 4;
+    view.setUint16(currentOffset, Math.round(cell.radius * 10), true); currentOffset += 2;
+
+    currentOffset = writeString(view, currentOffset, cell.color || '#ffffff');
+    currentOffset = writeString(view, currentOffset, cell.nickname || '');
+
+    let typeId = 0; // player
+    if (cell.type === 'pellet') typeId = 1;
+    else if (cell.type === 'virus') typeId = 2;
+    else if (cell.type === 'ejected') typeId = 3;
+    view.setUint8(currentOffset, typeId); currentOffset += 1;
+
+    const hasImage = !!(cell.image && cell.type === 'player');
+    view.setUint8(currentOffset, hasImage ? 1 : 0); currentOffset += 1;
+    if (hasImage) {
+        currentOffset = writeString(view, currentOffset, cell.image);
+    }
+    view.setFloat64(currentOffset, cell.mergeCooldown || 0, true); currentOffset += 8;
+
+    // For ejected mass, include ownerId
+    if(cell.type === 'ejected') {
+        currentOffset = writeString(view, currentOffset, cell.ownerId || '');
+    }
+    return currentOffset;
+}
+
+function encodeInitialState(state) {
+    let bufferSize = 1 + 2 + 2 + 2; // opcode, world, playerCount
+    for (const [playerId, cells] of Object.entries(state.players)) {
+        bufferSize += 2 + textEncoder.encode(playerId).length; // playerId
+        bufferSize += 2; // cellCount
+        for (const cell of cells) {
+            bufferSize += 4 + 2 + 2 + 4 + 2 + (2 + textEncoder.encode(cell.color || '#ffffff').length) + (2 + textEncoder.encode(cell.nickname || '').length) + 1 + 1 + 8 + (2 + textEncoder.encode(cell.ownerId || '').length);
+            if (cell.image && cell.type === 'player') {
+                bufferSize += 2 + textEncoder.encode(cell.image).length;
+            }
+        }
+    }
+
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+    let offset = 0;
+
+    view.setUint8(offset, S2C_OPCODES.INITIAL_STATE); offset += 1;
+    view.setUint16(offset, state.world.width, true); offset += 2;
+    view.setUint16(offset, state.world.height, true); offset += 2;
+
+    view.setUint16(offset, Object.keys(state.players).length, true); offset += 2;
+    for (const [playerId, cells] of Object.entries(state.players)) {
+        offset = writeString(view, offset, playerId);
+        view.setUint16(offset, cells.length, true); offset += 2;
+        for (const cell of cells) {
+            offset = encodeCell(view, offset, cell);
+        }
+    }
+    return buffer;
+}
+
+function encodeGameStateUpdate(updatePackage) {
+    let bufferSize = 1 + 2 + 2 + 2; // opcode, counts
+    updatePackage.updatedCells.forEach(cell => {
+        bufferSize += 4 + (2 + textEncoder.encode(cell.id).length) + 2 + 2 + 2 + 4 + 1; // cellId, id, x, y, radius, score, hasMerge
+        if (cell.mergeCooldown) bufferSize += 8;
+    });
+    updatePackage.newCells.forEach(cell => {
+        bufferSize += 4 + 2 + 2 + 4 + 2 + (2 + textEncoder.encode(cell.color || '#ffffff').length) + (2 + textEncoder.encode(cell.nickname || '').length) + 1 + 1 + 8 + (2 + textEncoder.encode(cell.ownerId || '').length);
+        if (cell.image && cell.type === 'player') {
+            bufferSize += 2 + textEncoder.encode(cell.image).length;
+        }
+    });
+    bufferSize += updatePackage.eatenCellIds.length * 4;
+
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+    let offset = 0;
+
+    view.setUint8(offset, S2C_OPCODES.GAME_STATE_UPDATE); offset += 1;
+
+    // Updated cells
+    view.setUint16(offset, updatePackage.updatedCells.length, true); offset += 2;
+    updatePackage.updatedCells.forEach(cell => {
+        view.setUint32(offset, cell.cellId, true); offset += 4;
+        offset = writeString(view, offset, cell.id);
+        view.setInt16(offset, Math.round(cell.x), true); offset += 2;
+        view.setInt16(offset, Math.round(cell.y), true); offset += 2;
+        view.setUint16(offset, Math.round(cell.radius * 10), true); offset += 2;
+        view.setUint32(offset, cell.score, true); offset += 4;
+        const hasMerge = cell.mergeCooldown !== undefined;
+        view.setUint8(offset, hasMerge ? 1 : 0); offset += 1;
+        if(hasMerge) {
+            view.setFloat64(offset, cell.mergeCooldown, true); offset += 8;
+        }
+    });
+
+    // New cells
+    view.setUint16(offset, updatePackage.newCells.length, true); offset += 2;
+    updatePackage.newCells.forEach(cell => {
+        offset = encodeCell(view, offset, cell);
+    });
+
+    // Eaten cells
+    view.setUint16(offset, updatePackage.eatenCellIds.length, true); offset += 2;
+    updatePackage.eatenCellIds.forEach(id => {
+        view.setUint32(offset, id, true); offset += 4;
+    });
+
+    return buffer;
+}
+
+function encodeLeaderboardUpdate(leaderboard) {
+    let bufferSize = 1 + 1; // opcode, count
+    leaderboard.forEach(p => {
+        bufferSize += (2 + textEncoder.encode(p.id).length) + (2 + textEncoder.encode(p.nickname).length) + 4;
+    });
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+    let offset = 0;
+    view.setUint8(offset, S2C_OPCODES.LEADERBOARD_UPDATE); offset += 1;
+    view.setUint8(offset, leaderboard.length); offset += 1;
+    leaderboard.forEach(p => {
+        offset = writeString(view, offset, p.id);
+        offset = writeString(view, offset, p.nickname);
+        view.setUint32(offset, p.score, true); offset += 4;
+    });
+    return buffer;
+}
+
+function encodeSystemMessage(message) {
+    const messageBytes = textEncoder.encode(message.message);
+    const buffer = new ArrayBuffer(1 + 2 + messageBytes.length);
+    const view = new DataView(buffer);
+    view.setUint8(0, S2C_OPCODES.SYSTEM_MESSAGE);
+    writeString(view, 1, message.message);
+    return buffer;
+}
+
+function encodeChatMessage(data) {
+    let bufferSize = 1; // opcode
+    bufferSize += (2 + textEncoder.encode(data.playerId).length);
+    bufferSize += (2 + textEncoder.encode(data.nickname).length);
+    bufferSize += (2 + textEncoder.encode(data.message).length);
+    const buffer = new ArrayBuffer(bufferSize);
+    const view = new DataView(buffer);
+    let offset = 0;
+    view.setUint8(offset, S2C_OPCODES.CHAT_MESSAGE); offset += 1;
+    offset = writeString(view, offset, data.playerId);
+    offset = writeString(view, offset, data.nickname);
+    offset = writeString(view, offset, data.message);
+    return buffer;
+}
+
 // Network broadcast with interest management
 setInterval(() => {
-    if (Object.keys(players).length === 0) return;
+    if (Object.keys(players).length <= 1) return; // Only duds
 
     // Update interest areas for all players
     Object.keys(players).forEach(playerId => {
@@ -1040,7 +1238,6 @@ setInterval(() => {
         const playerLastState = lastBroadcastState[playerId] || {};
         const currentCellIds = new Set();
 
-        // Check all cells within interest area
         const allCurrentCells = Object.values(players).flat();
 
         for (const cell of allCurrentCells) {
@@ -1063,9 +1260,9 @@ setInterval(() => {
                     const updatedCellData = {
                         cellId: cell.cellId,
                         id: cell.id,
-                        x: Math.round(cell.x * 10) / 10,
-                        y: Math.round(cell.y * 10) / 10,
-                        radius: Math.round(cell.radius * 10) / 10,
+                        x: cell.x,
+                        y: cell.y,
+                        radius: cell.radius,
                         score: Math.round(cell.score),
                     };
                     if (cell.mergeCooldown !== oldCellState.mergeCooldown) {
@@ -1076,7 +1273,6 @@ setInterval(() => {
             }
         }
 
-        // Check for eaten cells that were previously visible
         for (const cellId in playerLastState) {
             if (!currentCellIds.has(parseInt(cellId))) {
                 updatePackage.eatenCellIds.push(parseInt(cellId));
@@ -1084,10 +1280,9 @@ setInterval(() => {
         }
 
         if (updatePackage.newCells.length > 0 || updatePackage.updatedCells.length > 0 || updatePackage.eatenCellIds.length > 0) {
-            io.to(playerId).emit('gameStateUpdate', updatePackage);
+            io.to(playerId).emit('message', encodeGameStateUpdate(updatePackage));
         }
 
-        // Update the player's last broadcast state
         const newPlayerState = {};
         allCurrentCells.forEach(cell => {
             if (isInInterestArea(cell, interestArea)) {
@@ -1105,9 +1300,8 @@ setInterval(() => {
 
 // Leaderboard update loop
 setInterval(() => {
-    if (Object.keys(players).length === 0) return;
+    if (Object.keys(players).length <= 1) return;
 
-    // Calculate leaderboard from all players
     const playerScores = Object.entries(players)
         .filter(([id, pCells]) => id !== DUD_PLAYER_ID && pCells.length > 0)
         .map(([id, pCells]) => {
@@ -1118,11 +1312,11 @@ setInterval(() => {
             };
         });
 
-    // Sort and take top 5, since that's what the client shows
     const topPlayers = playerScores.sort((a, b) => b.score - a.score).slice(0, 5);
 
-    // Broadcast the new leaderboard data to all clients
-    io.emit('leaderboardUpdate', topPlayers);
+    if (topPlayers.length > 0) {
+        io.send(encodeLeaderboardUpdate(topPlayers));
+    }
 }, 1000); // Update every second
 
 server.listen(PORT, () => {
