@@ -14,28 +14,29 @@ let debugMode = false;
 let customZoomMultiplier = 1.0;
 let activeInputTarget = null;
 
-// OPTIMIZATION: Performance monitoring
+// Performance monitoring
 let frameCount = 0;
 let fps = 0;
 let lastFpsUpdate = 0;
 let lastFrameTime = 0;
 let frameTimeAccumulator = 0;
 
-// OPTIMIZATION: Render caching
+// Render caching
 let leaderboardCache = null;
 let leaderboardCacheTime = 0;
 const LEADERBOARD_CACHE_DURATION = 500; // Update leaderboard every 500ms
 
-// NEW: Performance Settings
+// Performance Settings
 let settings = {
     highResolution: !isMobileDevice(),
     highQualityGraphics: true,
     showNicknames: true,
     showImages: true,
-    frameRateLimit: 60, // NEW: Frame rate limit
-    renderDistance: 1500, // NEW: Render distance
-    particleEffects: true, // NEW: Particle effects
-    smoothCells: true // NEW: Smooth cell rendering
+    frameRateLimit: 60, // Frame rate limit
+    renderDistance: 1500, // Render distance
+    particleEffects: true, // Particle effects
+    smoothCells: true, // Smooth cell rendering
+    rememberScore: true, // Remember player score
 };
 
 // Xbox 360 Controller variables
@@ -77,6 +78,7 @@ const settingFrameRate = document.getElementById('setting-framerate');
 const settingRenderDistance = document.getElementById('setting-renderdistance');
 const settingParticles = document.getElementById('setting-particles');
 const settingSmoothCells = document.getElementById('setting-smoothcells');
+const settingRememberScore = document.getElementById('setting-remember-score');
 
 // Mobile keyboard elements
 const mobileKeyboard = document.getElementById('mobile-keyboard');
@@ -109,7 +111,8 @@ function loadSettings() {
             frameRateLimit: 60,
             renderDistance: 1500,
             particleEffects: true,
-            smoothCells: true
+            smoothCells: true,
+            rememberScore: true
         };
     }
     updateSettingsUI();
@@ -124,6 +127,7 @@ function updateSettingsUI() {
     if (settingRenderDistance) settingRenderDistance.value = settings.renderDistance;
     if (settingParticles) settingParticles.checked = settings.particleEffects;
     if (settingSmoothCells) settingSmoothCells.checked = settings.smoothCells;
+    if (settingRememberScore) settingRememberScore.checked = settings.rememberScore;
 }
 
 function setupSettingsListeners() {
@@ -173,6 +177,12 @@ function setupSettingsListeners() {
     if (settingSmoothCells) {
         settingSmoothCells.addEventListener('change', () => {
             settings.smoothCells = settingSmoothCells.checked;
+            saveSettings();
+        });
+    }
+    if (settingRememberScore) {
+        settingRememberScore.addEventListener('change', () => {
+            settings.rememberScore = settingRememberScore.checked;
             saveSettings();
         });
     }
@@ -519,6 +529,22 @@ function handleKeyboardConfirm() {
 }
 
 // --- Start Screen & Game Initialization Logic ---
+// Function to get or create a persistent player token
+function getPlayerToken() {
+    const tokenKey = 'agarGamePlayerToken';
+    let token = localStorage.getItem(tokenKey);
+    if (!token) {
+        token = 'player_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        try {
+            localStorage.setItem(tokenKey, token);
+        } catch(e) {
+            console.error("Could not save player token to localStorage", e);
+            return null; // Can't save, so can't use the feature
+        }
+    }
+    return token;
+}
+
 playButton.addEventListener('click', () => {
     const nickname = nicknameInput.value.trim();
     if (nickname.length === 0) {
@@ -537,7 +563,6 @@ playButton.addEventListener('click', () => {
             errorMessage.textContent = 'Image is too large (max 2MB).';
             errorMessage.classList.remove('hidden');
             playButton.disabled = false;
-            playButton.textContent = 'Play';
             return;
         }
 
@@ -690,7 +715,12 @@ function initializeGame(nickname, color, imageDataUrl) {
         setInterval(measurePing, 2000);
 
         try {
-            socket.emit('joinGame', { nickname, color, image: imageDataUrl });
+            const joinData = { nickname, color, image: imageDataUrl };
+            // Send player token if setting is enabled
+            if (settings.rememberScore) {
+                joinData.playerToken = getPlayerToken();
+            }
+            socket.emit('joinGame', joinData);
         } catch (error) {
             console.error('Error sending joinGame:', error);
             clearTimeout(connectionTimeout);
@@ -718,6 +748,8 @@ function initializeGame(nickname, color, imageDataUrl) {
 
     socket.on('disconnect', (reason) => {
         console.log('Disconnected:', reason);
+        // Client-side score saving logic is now gone.
+
         clearTimeout(connectionTimeout);
         showStartScreen();
         if (reason === 'io client disconnect') {
@@ -823,7 +855,9 @@ function initializeGame(nickname, color, imageDataUrl) {
         }
     });
 
-    socket.on('youDied', (data) => showStartScreen(data.score));
+    socket.on('youDied', (data) => {
+        showStartScreen(data.score)
+    });
 
     socket.on('pong', () => {
         const pingTime = Date.now() - lastPingTime;
@@ -1124,7 +1158,7 @@ function setupTouchControls() {
     }
 }
 
-// OPTIMIZATION: Frame rate limiting
+// Frame rate limiting
 let lastRenderTime = 0;
 
 // --- Game Loop ---
@@ -1271,7 +1305,7 @@ function gameLoop(currentTime) {
     ctx.scale(camera.zoom, camera.zoom);
     ctx.translate(-camera.x, -camera.y);
 
-    // OPTIMIZATION: Calculate camera view bounds with render distance
+    // Calculate camera view bounds with render distance
     const dpr = settings.highResolution ? (window.devicePixelRatio || 1) : 1;
     const viewWidth = (cssWidth * dpr) / camera.zoom;
     const viewHeight = (cssHeight * dpr) / camera.zoom;
@@ -1287,7 +1321,7 @@ function gameLoop(currentTime) {
 
     const allSortedCells = Object.values(players).flat().sort((a, b) => a.radius - b.radius);
     allSortedCells.forEach(cell => {
-        // OPTIMIZATION: View frustum culling with render distance
+        // View frustum culling with render distance
         if (cell.x + cell.radius < viewLeft ||
             cell.x - cell.radius > viewRight ||
             cell.y + cell.radius < viewTop ||
@@ -1297,7 +1331,7 @@ function gameLoop(currentTime) {
 
         if (cell.animationOffset === undefined) { cell.animationOffset = Math.random() * 2 * Math.PI; }
 
-        // OPTIMIZATION: Use simple or complex rendering based on settings
+        // Use simple or complex rendering based on settings
         if (settings.smoothCells) {
             drawSquishyCell(ctx, cell, [], world);
         } else {
@@ -1491,7 +1525,7 @@ function drawGrid(viewLeft, viewRight, viewTop, viewBottom) {
     }
 }
 
-// OPTIMIZATION: Simple cell rendering for performance mode
+// Simple cell rendering for performance mode
 function drawSimpleCell(ctx, cell) {
     const img = settings.showImages ? imageCache[cell.id === DUD_PLAYER_ID ? cell.ownerId : cell.id] : null;
 
@@ -1639,7 +1673,7 @@ function drawMinimap(playerCells, cssWidth, cssHeight) {
     });
 }
 
-// OPTIMIZATION: Cache leaderboard rendering
+// Cache leaderboard rendering
 function drawLeaderboard(cssWidth, cssHeight) {
     const currentTime = Date.now();
 

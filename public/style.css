@@ -34,7 +34,7 @@ canvas {
     padding: 30px 15px;
 }
 
-/* MODIFIED: Container for form and settings */
+/* Container for form and settings */
 .start-content {
     display: flex;
     flex-wrap: wrap;
@@ -139,7 +139,7 @@ canvas {
     font-weight: bold;
 }
 
-/* --- NEW: Performance Settings Styles --- */
+/* --- Performance Settings Styles --- */
 #performance-settings {
     background-color: #2c3e50;
     padding: 20px 30px;
@@ -199,7 +199,6 @@ canvas {
     background-color: white;
 }
 
-/* START: ADDED CSS FOR NEW SETTINGS */
 #performance-settings select {
     background-color: #34495e;
     color: white;
@@ -220,7 +219,6 @@ canvas {
     outline: none;
     border-color: #3498db;
 }
-/* END: ADDED CSS FOR NEW SETTINGS */
 
 .settings-info {
     font-size: 13px;
@@ -594,7 +592,7 @@ canvas {
     #chat-input[readonly]:active { background-color: rgba(255, 255, 255, 0.1) !important; }
 }
 
-/* REFACTORED: Mobile Landscape Mode */
+/* Mobile Landscape Mode */
 @media (max-height: 550px) and (orientation: landscape) {
     #start-screen {
         justify-content: flex-start; /* Align content to left for horizontal scroll */
@@ -635,7 +633,7 @@ canvas {
     .setting-item { font-size: 14px; margin-bottom: 15px; }
 }
 
-/* --- NEW: Desktop-specific adjustments for Start Screen --- */
+/* --- Desktop-specific adjustments for Start Screen --- */
 @media (min-width: 769px) {
     #start-screen {
         /* Restore vertical centering on larger screens */

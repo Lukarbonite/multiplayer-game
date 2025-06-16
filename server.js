@@ -202,7 +202,7 @@ const VIRUS_LAUNCH_SPEED = 800;
 
 const DUD_PLAYER_ID = 'duds';
 
-// OPTIMIZATION: Performance settings
+// Performance settings
 const PHYSICS_UPDATE_RATE = 60; // Hz
 const NETWORK_UPDATE_RATE = 30; // Hz
 const INTEREST_RADIUS = 1500; // Only send updates for objects within this radius
@@ -216,7 +216,10 @@ let playerInputs = {};
 let lastBroadcastState = {};
 let playerInterestAreas = {}; // Track what each player can see
 
-// OPTIMIZATION: Use spatial hash for faster lookups
+let savedScores = {}; // Cache for disconnected players' scores, keyed by a persistent token
+let socketIdToPlayerToken = {}; // Map socket.id to the player's persistent token
+
+// Use spatial hash for faster lookups
 const spatialHash = new SpatialHash(SPATIAL_HASH_CELL_SIZE);
 
 function getRadiusFromScore(score) {
@@ -282,7 +285,7 @@ function initializeGameObjects() {
 }
 initializeGameObjects();
 
-// OPTIMIZATION: Calculate player's interest area (what they can see)
+// Calculate player's interest area (what they can see)
 function calculateInterestArea(playerId) {
     const playerCells = players[playerId];
     if (!playerCells || playerCells.length === 0) return null;
@@ -300,7 +303,7 @@ function calculateInterestArea(playerId) {
     return { minX, maxX, minY, maxY };
 }
 
-// OPTIMIZATION: Check if object is within player's interest area
+// Check if object is within player's interest area
 function isInInterestArea(obj, interestArea) {
     if (!interestArea) return false;
     return obj.x >= interestArea.minX && obj.x <= interestArea.maxX &&
@@ -314,11 +317,29 @@ io.on('connection', (socket) => {
         console.log(`Player ${data.nickname} (${socket.id}) joined successfully.`);
         const halfWidth = WORLD_WIDTH / 2;
         const halfHeight = WORLD_HEIGHT / 2;
+
+        // REVISED: Handle score restoration using persistent token
+        let startScore = PLAYER_START_SCORE;
+        if (data.playerToken) {
+            socketIdToPlayerToken[socket.id] = data.playerToken; // Map current socket.id to token
+            if (savedScores[data.playerToken]) {
+                startScore = savedScores[data.playerToken];
+                console.log(`Player ${data.nickname} (${data.playerToken}) is rejoining with a score of ${startScore}`);
+                // Remove score from cache so it can't be used again
+                delete savedScores[data.playerToken];
+            }
+        } else {
+            // If no token, check if a score was sent (legacy, might be removed later)
+            if (data.startScore && typeof data.startScore === 'number') {
+                startScore = Math.max(PLAYER_START_SCORE, Math.min(Math.round(data.startScore), 20000));
+            }
+        }
+
         players[socket.id] = [{
             x: Math.floor(Math.random() * WORLD_WIDTH) - halfWidth,
             y: Math.floor(Math.random() * WORLD_HEIGHT) - halfHeight,
-            score: PLAYER_START_SCORE,
-            radius: getRadiusFromScore(PLAYER_START_SCORE),
+            score: startScore,
+            radius: getRadiusFromScore(startScore),
             color: data.color || '#ffffff',
             nickname: data.nickname || 'Player',
             type: 'player',
@@ -334,7 +355,7 @@ io.on('connection', (socket) => {
             worldMouseY: players[socket.id][0].y
         };
 
-        // OPTIMIZATION: Only send visible objects on initial state
+        // Only send visible objects on initial state
         const interestArea = calculateInterestArea(socket.id);
         const visiblePlayers = {};
 
@@ -365,6 +386,17 @@ io.on('connection', (socket) => {
             const playerNickname = players[socket.id][0].nickname;
             console.log(`Player ${playerNickname} disconnected.`);
 
+            // Server-side score saving on disconnect
+            const playerToken = socketIdToPlayerToken[socket.id];
+            // Check if the player still exists (i.e., they weren't eaten)
+            if (playerToken && players[socket.id] && players[socket.id].length > 0) {
+                const totalScore = players[socket.id].reduce((sum, cell) => sum + (cell.score || 0), 0);
+                if (totalScore > PLAYER_START_SCORE) {
+                    savedScores[playerToken] = Math.round(totalScore);
+                    console.log(`Saved score ${savedScores[playerToken]} for player token ${playerToken}`);
+                }
+            }
+
             delete players[socket.id];
             delete playerInputs[socket.id];
             delete playerInterestAreas[socket.id];
@@ -374,6 +406,11 @@ io.on('connection', (socket) => {
                 message: `${playerNickname} left the game`,
                 timestamp: Date.now()
             });
+
+            // Clean up the token mapping
+            if (playerToken) {
+                delete socketIdToPlayerToken[socket.id];
+            }
         }
     });
 
@@ -530,7 +567,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// OPTIMIZATION: Separate physics update from network update
+// Separate physics update from network update
 let physicsAccumulator = 0;
 let lastPhysicsTime = Date.now();
 
@@ -593,7 +630,7 @@ function updatePhysics(deltaTime) {
         }
     }
 
-    // OPTIMIZATION: Build spatial hash
+    // Build spatial hash
     spatialHash.clear();
     const allCells = Object.values(players).flat();
     for (const cell of allCells) {
@@ -944,7 +981,7 @@ function updatePhysics(deltaTime) {
     }
 }
 
-// OPTIMIZATION: Network broadcast with interest management
+// Network broadcast with interest management
 setInterval(() => {
     if (Object.keys(players).length === 0) return;
 
